@@ -59,17 +59,21 @@ void unlock() { __atomic_store_n(&g_lock, 0, __ATOMIC_RELEASE); }
 
 // Bytes written as data and then executed: the instruction cache must see
 // them. x86-64 keeps the two coherent; AArch64 does not, and the maintenance
-// is written out because no library is here to call (cache line sizes from
-// CTR_EL0, which user code may read on the systems this targets).
+// is written out because no library is here to call.
+//
+// THE LINE SIZE IS NOT READ FROM CTR_EL0. One system traps a read of it at
+// user level, and the program died of SIGILL there before its first
+// instruction ran (measured on macos-arm64). The maintenance instructions
+// themselves are permitted on every system this runs upon, and a stride of 32
+// bytes --- below any line size an AArch64 core has --- reaches every line at
+// the cost of repeating some.
 void sync_instructions(unsigned char* from, unsigned char* to) {
 #if defined(__aarch64__)
-    unsigned long long ctr;
-    __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
-    const unsigned long long dline = 4ull << ((ctr >> 16) & 15), iline = 4ull << (ctr & 15);
+    constexpr unsigned long long line = 32;
     const auto b = reinterpret_cast<unsigned long long>(from), e = reinterpret_cast<unsigned long long>(to);
-    for (auto p = b & ~(dline - 1); p < e; p += dline) __asm__ __volatile__("dc cvau, %0" :: "r"(p) : "memory");
+    for (auto p = b & ~(line - 1); p < e; p += line) __asm__ __volatile__("dc cvau, %0" :: "r"(p) : "memory");
     __asm__ __volatile__("dsb ish" ::: "memory");
-    for (auto p = b & ~(iline - 1); p < e; p += iline) __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
+    for (auto p = b & ~(line - 1); p < e; p += line) __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
     __asm__ __volatile__("dsb ish\n\tisb" ::: "memory");
 #else
     (void)from; (void)to;
