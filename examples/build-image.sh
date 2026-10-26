@@ -21,6 +21,7 @@ objs=()
 for src in "${sources[@]}" "$work/note.S"; do
   o="$work/$(basename "$src").o"
   "$CLANG" --target="$arch-unknown-none-elf" -ffreestanding -fPIC -fvisibility=hidden -femulated-tls \
+    -fasynchronous-unwind-tables -Xclang -fstack-clash-protection \
     -fno-stack-protector -fno-builtin -O2 "${extra[@]}" -c "$src" -o "$o"
   objs+=("$o")
 done
