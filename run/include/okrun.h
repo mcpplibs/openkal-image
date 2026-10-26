@@ -32,6 +32,9 @@ int okrun_run_bytes(const void* bytes, unsigned long long size, const char* name
 int okrun_run_file(const char* path, int argc, const char* const* argv,
                    const struct okrun_options* options, char* why, unsigned long long why_cap);
 
+/* The names this runner binds (the specification's surface), `count' of them. */
+const char* const* okrun_names(unsigned long* count);
+
 /* The address an image's import of `name' is bound to, in the image's
  * convention; null for a name this runner does not bind. */
 void* okrun_resolve(const char* name);

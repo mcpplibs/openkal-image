@@ -8,3 +8,4 @@ export using ::okrun_options;
 export using ::okrun_run_bytes;
 export using ::okrun_run_file;
 export using ::okrun_resolve;
+export using ::okrun_names;

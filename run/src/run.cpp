@@ -131,6 +131,20 @@ image_state& state() { return g_state; }
 
 using namespace okrun;
 
+extern "C" const char* const* okrun_names(unsigned long* count) {
+    static const char* names[256];
+    static unsigned long n = 0;
+    if (n == 0) {
+        unsigned long k = 0;
+        const binding* t = bindings(k);
+        for (unsigned long i = 0; i < k && n < 256; ++i) names[n++] = t[i].name;
+        t = space_bindings(k);
+        for (unsigned long i = 0; t && i < k && n < 256; ++i) names[n++] = t[i].name;
+    }
+    if (count) *count = n;
+    return names;
+}
+
 extern "C" void* okrun_resolve(const char* name) {
     unsigned long n = 0;
     const binding* t = bindings(n);

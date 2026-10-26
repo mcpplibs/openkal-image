@@ -12,17 +12,18 @@
 // It does not link: an image is linked by an ordinary linker (`ld.lld -shared').
 import std;
 import openkal.ld;
+import openkal.run;
 
 namespace {
 
 const std::set<std::string>& surface() {
     static const std::set<std::string> names = [] {
+        // The specification's surface, as libokrun binds it (generated from
+        // SURFACE.txt by openkal-run's build.mcpp).
         std::set<std::string> s;
-#define OKRUN_BIND(n) s.insert(#n);
-#define OKRUN_OWN(n) s.insert(#n);
-#define OKRUN_CALLBACK(n) s.insert(#n);
-#include "../../run/src/surface.inc"
-#include "../../run/src/surface_space.inc"
+        unsigned long n = 0;
+        const char* const* names = okrun_names(&n);
+        for (unsigned long i = 0; i < n; ++i) s.insert(names[i]);
         return s;
     }();
     return names;
