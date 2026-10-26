@@ -62,6 +62,12 @@ OKRUN_IMAGE_ABI kal_intptr own_kal_env_arg(kal_uintptr i, char* out, kal_uintptr
 OKRUN_IMAGE_ABI kal_intptr own_kal_env_image(char* out, kal_uintptr cap) {
     return state().name ? give(state().name, length(state().name), out, cap) : -kal_err_not_found;
 }
+// The program that runs the image: the runner's own image, as the process's
+// implementation names it (SPEC 12.3) --- which with the image's name starts
+// the same program again.
+OKRUN_IMAGE_ABI kal_intptr own_kal_env_loader(char* out, kal_uintptr cap) {
+    return kal_env_image(out, cap);
+}
 
 #define OKRUN_BIND(n)     { #n, reinterpret_cast<void*>(&present<&::n>::call) },
 #define OKRUN_OWN(n)      { #n, reinterpret_cast<void*>(&own_##n) },

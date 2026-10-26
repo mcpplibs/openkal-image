@@ -27,7 +27,7 @@ int main() {
     // The arguments and the image's own name are the runner's to answer (SPEC
     // 12.3); a context's entry is entered in the image's convention through a
     // box; every other name is the implementation's.
-    const std::set<std::string> own{ "kal_env_arg_count", "kal_env_arg", "kal_env_image" };
+    const std::set<std::string> own{ "kal_env_arg_count", "kal_env_arg", "kal_env_image", "kal_env_loader" };
     const std::set<std::string> callbacks{ "kal_task_start", "kal_task_start_sized" };
     std::vector<std::string> main_names, space_names;
     std::string group, line;
