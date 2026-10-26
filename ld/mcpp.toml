@@ -1,0 +1,18 @@
+[package]
+namespace   = "mcpplibs"
+name        = "openkal-ld"
+version     = "0.1.0"
+description = "libokld: the ok format (openkal image format) --- its definition, a reader of bytes, a checker, a signer, and a loader. Freestanding: no C library, no exceptions."
+license     = "Apache-2.0"
+authors     = ["mcpplibs"]
+repo        = "https://github.com/mcpplibs/openkal-image"
+
+[targets.okld]
+kind = "lib"
+
+[build]
+sources = ["src/*.cppm", "src/*.cpp"]
+include_dirs = ["include"]
+flags = [
+  { glob = "src/*.cpp", cxxflags = ["-fno-exceptions", "-fno-rtti", "-fno-stack-protector"] },
+]

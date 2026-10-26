@@ -1,0 +1,146 @@
+name: CI
+
+# What this workflow asserts about the ok format's reference implementation.
+#
+#   images     images are built once, on one machine, for each architecture:
+#              freestanding C, linked by an ordinary linker, noted and checked by
+#              okld; one is signed. libokld's cryptography holds against the
+#              published vectors. The binding list is generated from the
+#              specification's SURFACE.txt at every build (run/build.mcpp).
+#   run        THE SAME BYTES run on every system of their architecture through
+#              okrun built there --- arguments, thread-local storage, a callback
+#              into the image, an image another needs --- and the refusals hold:
+#              an unsigned image where a signature is required, a changed byte,
+#              an untrusted key.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  XLINGS_VERSION: v2026.10.26.1
+  XLINGS_NON_INTERACTIVE: '1'
+  LLVM: llvm@23.1.3
+
+jobs:
+  images:
+    name: images (built once)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xlings and mcpp
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - name: mcpp and LLVM
+        run: |
+          xlings install mcpp -y -g
+          mcpp self config --mirror GLOBAL
+          mcpp toolchain install llvm 23.1.3
+          mcpp toolchain default "$LLVM"
+      - name: libokld against the published vectors
+        run: (cd ld && mcpp test)
+      - name: okld
+        run: |
+          (cd tools && mcpp build --release)
+          echo "OKLD=$(find "$PWD/target" -path '*bin*' -name okld -type f | head -1)" >> "$GITHUB_ENV"
+      - name: The images
+        run: |
+          bin="$HOME/.mcpp/registry/data/xpkgs/xim-x-llvm/23.1.3/bin"
+          export CLANG="$bin/clang" LLD="$bin/ld.lld"
+          mkdir -p out
+          for arch in x86_64 aarch64; do
+            mkdir -p "out/$arch"
+            bash examples/build-image.sh "$arch" "out/$arch/hello.oke" examples/hello/app.c
+            bash examples/build-image.sh "$arch" "out/$arch/liboktwice.okso" examples/needed/lib.c
+            bash examples/build-image.sh "$arch" "out/$arch/needed.oke" examples/needed/app.c -- "out/$arch/liboktwice.okso"
+            # A weak import requires no interface (SPEC 12.4).
+            req=$(bash examples/build-image.sh "$arch" "out/$arch/weak.oke" examples/weak/app.c | grep 'requires')
+            echo "$req"
+            grep -q 'openkal.stream' <<<"$req" && ! grep -q 'openkal.net' <<<"$req" \
+              || { echo "::error::a weak import made the image require its interface"; exit 1; }
+            cp "out/$arch/hello.oke" "out/$arch/signed.oke"
+          done
+          "$OKLD" keygen "$RUNNER_TEMP/seed" > out/key.hex
+          for arch in x86_64 aarch64; do
+            "$OKLD" sign "out/$arch/signed.oke" "$RUNNER_TEMP/seed"
+            "$OKLD" inspect "out/$arch/signed.oke"
+            python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[len(d)//2]^=1; open(sys.argv[2],'wb').write(d)" \
+              "out/$arch/signed.oke" "out/$arch/tampered.oke"
+          done
+          (cd out && sha256sum */*.oke */*.okso | tee SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with: { name: images, path: out/ }
+
+  run:
+    name: run (${{ matrix.host }})
+    needs: images
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: linux-x86_64,   os: ubuntu-24.04,     arch: x86_64 }
+          - { host: linux-aarch64,  os: ubuntu-24.04-arm, arch: aarch64 }
+          - { host: macos-arm64,    os: macos-15,         arch: aarch64 }
+          - { host: windows-x86_64, os: windows-2022,     arch: x86_64 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: images, path: out }
+      - name: Install xlings (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - name: Install xlings (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm https://d2learn.org/xlings-install.ps1.txt | iex
+          "$env:USERPROFILE\.xlings\subos\current\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: okrun, built here
+        run: |
+          xlings install mcpp -y -g
+          mcpp self config --mirror GLOBAL
+          mcpp toolchain install llvm 23.1.3
+          mcpp toolchain default "$LLVM"
+          (cd tools && mcpp build --release)
+          okrun=$(find "$PWD/target" -path '*bin*' \( -name okrun -o -name okrun.exe \) -type f | head -1)
+          [ -n "$okrun" ] || { echo "::error::okrun did not build"; exit 1; }
+          echo "OKRUN=$okrun" >> "$GITHUB_ENV"
+      - name: The same bytes
+        run: |
+          a='${{ matrix.arch }}'
+          if command -v sha256sum > /dev/null; then (cd out && sha256sum -c --ignore-missing SHA256SUMS)
+          else (cd out && shasum -a 256 -c --ignore-missing SHA256SUMS); fi
+          out=$("$OKRUN" "out/$a/hello.oke" one two | tr -d '\r')
+          echo "$out"
+          grep -q "argc as kal_env_arg_count = 3" <<<"$out" || { echo "::error::the image's arguments"; exit 1; }
+          grep -q "mix = 204" <<<"$out" || { echo "::error::the calling convention"; exit 1; }
+          grep -q "tls main=1 ctx1=10 ctx2=20" <<<"$out" || { echo "::error::thread-local storage or the callback"; exit 1; }
+          n=$("$OKRUN" "out/$a/needed.oke" | tr -d '\r')
+          echo "$n"
+          grep -q "twice(21) = 42, next_value() = 41" <<<"$n" || { echo "::error::an image another needs"; exit 1; }
+          w=$("$OKRUN" "out/$a/weak.oke" | tr -d '\r')
+          echo "$w"
+          grep -q "weak: openkal.net bound" <<<"$w" || { echo "::error::a weak import the implementation provides was not bound"; exit 1; }
+      - name: The refusals
+        run: |
+          a='${{ matrix.arch }}'
+          key=$(cat out/key.hex)
+          "$OKRUN" --require-signature --trust "$key" "out/$a/signed.oke" > /dev/null || { echo "::error::a signed image by a trusted key was refused"; exit 1; }
+          if "$OKRUN" --require-signature "out/$a/hello.oke" 2> e1.txt; then echo "::error::an unsigned image ran"; exit 1; fi
+          grep -q "not signed" e1.txt
+          if "$OKRUN" --require-signature "out/$a/tampered.oke" 2> e2.txt; then echo "::error::a changed image ran"; exit 1; fi
+          grep -q "does not hold" e2.txt
+          if "$OKRUN" --trust 00000000000000000000000000000000000000000000000000000000000000aa "out/$a/signed.oke" 2> e3.txt; then echo "::error::an untrusted key's image ran"; exit 1; fi
+          grep -q "not trusted" e3.txt
+          echo "  ok  unsigned, changed and untrusted images are refused, and say why"
