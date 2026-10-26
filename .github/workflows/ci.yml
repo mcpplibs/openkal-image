@@ -70,7 +70,7 @@ jobs:
             python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[len(d)//2]^=1; open(sys.argv[2],'wb').write(d)" \
               "out/$arch/signed.oke" "out/$arch/tampered.oke"
           done
-          sha256sum out/*/*.oke out/*/*.okso | tee out/SHA256SUMS
+          (cd out && sha256sum */*.oke */*.okso | tee SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with: { name: images, path: out/ }
 
