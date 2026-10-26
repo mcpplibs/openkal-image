@@ -57,6 +57,11 @@ jobs:
             bash examples/build-image.sh "$arch" "out/$arch/hello.oke" examples/hello/app.c
             bash examples/build-image.sh "$arch" "out/$arch/liboktwice.okso" examples/needed/lib.c
             bash examples/build-image.sh "$arch" "out/$arch/needed.oke" examples/needed/app.c -- "out/$arch/liboktwice.okso"
+            # A weak import requires no interface (SPEC 12.4).
+            req=$(bash examples/build-image.sh "$arch" "out/$arch/weak.oke" examples/weak/app.c | grep 'requires')
+            echo "$req"
+            grep -q 'openkal.stream' <<<"$req" && ! grep -q 'openkal.net' <<<"$req" \
+              || { echo "::error::a weak import made the image require its interface"; exit 1; }
             cp "out/$arch/hello.oke" "out/$arch/signed.oke"
           done
           "$OKLD" keygen "$RUNNER_TEMP/seed" > out/key.hex
@@ -124,6 +129,9 @@ jobs:
           n=$("$OKRUN" "out/$a/needed.oke" | tr -d '\r')
           echo "$n"
           grep -q "twice(21) = 42, next_value() = 41" <<<"$n" || { echo "::error::an image another needs"; exit 1; }
+          w=$("$OKRUN" "out/$a/weak.oke" | tr -d '\r')
+          echo "$w"
+          grep -q "weak: openkal.net bound" <<<"$w" || { echo "::error::a weak import the implementation provides was not bound"; exit 1; }
       - name: The refusals
         run: |
           a='${{ matrix.arch }}'

@@ -118,7 +118,8 @@ extern "C" int okld_read(const void* bytes, okld_size n, okld_info* out, okld_wh
     return 0;
 }
 
-extern "C" void okld_imports(const void* bytes, okld_size n, void (*each)(const char*, void*), void* ctx) {
+namespace {
+void each_import(const void* bytes, okld_size n, bool weak_too, void (*each)(const char*, void*), void* ctx) {
     view v;
     char why[8];
     if (!open(bytes, n, v, why, sizeof why)) return;
@@ -126,8 +127,18 @@ extern "C" void okld_imports(const void* bytes, okld_size n, void (*each)(const 
     const auto count = v.symbol_count();
     if (!syms) return;
     for (size k = 1; k < count; ++k)
-        if (syms[k].shndx == elf::shn_undef && syms[k].name)
+        if (syms[k].shndx == elf::shn_undef && syms[k].name
+            && (weak_too || elf::st_bind(syms[k].info) != elf::stb_weak))
             if (const char* name = v.string(syms[k].name); name && *name) each(name, ctx);
+}
+}  // namespace
+
+extern "C" void okld_imports(const void* bytes, okld_size n, void (*each)(const char*, void*), void* ctx) {
+    each_import(bytes, n, true, each, ctx);
+}
+
+extern "C" void okld_required_imports(const void* bytes, okld_size n, void (*each)(const char*, void*), void* ctx) {
+    each_import(bytes, n, false, each, ctx);
 }
 
 extern "C" void okld_exports(const void* bytes, okld_size n, void (*each)(const char*, void*), void* ctx) {

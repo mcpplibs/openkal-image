@@ -110,8 +110,8 @@ int main(int argc, char** argv) {
     }
     if (verb == "note") {
         okld_u64 bits = 0;
-        okld_imports(image->data(), image->size(),
-                     [](const char* n, void* c) { *static_cast<okld_u64*>(c) |= okld_interface_of(n); }, &bits);
+        okld_required_imports(image->data(), image->size(),
+                              [](const char* n, void* c) { *static_cast<okld_u64*>(c) |= okld_interface_of(n); }, &bits);
         okld_why why{};
         if (okld_set_requirements(image->data(), image->size(), bits, &why) != 0) { std::println(std::cerr, "okld: {}", why.text); return 1; }
         if (!write_file(args[1], *image)) return 1;

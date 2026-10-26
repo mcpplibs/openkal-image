@@ -56,6 +56,11 @@ int okld_check(const void* bytes, okld_size size, okld_name_test known_kal,
 
 /* The names an image imports, and the names it exports, one call each. */
 void okld_imports(const void* bytes, okld_size size, void (*each)(const char* name, void* ctx), void* ctx);
+/* The names an image requires: its imports less its weak ones. A weak import
+ * is bound when the implementation or a needed image provides it and is zero
+ * otherwise, so it requires no interface (SPEC 12.4); the requirements note is
+ * derived from these. */
+void okld_required_imports(const void* bytes, okld_size size, void (*each)(const char* name, void* ctx), void* ctx);
 void okld_exports(const void* bytes, okld_size size, void (*each)(const char* name, void* ctx), void* ctx);
 
 /* The `KAL_IFACE_*' positions a set of imported names requires: each `kal_'

@@ -17,6 +17,7 @@ export using ::okld_report;
 export using ::okld_read;
 export using ::okld_check;
 export using ::okld_imports;
+export using ::okld_required_imports;
 export using ::okld_exports;
 export using ::okld_interface_of;
 export using ::okld_set_requirements;
