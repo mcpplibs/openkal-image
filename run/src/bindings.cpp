@@ -60,6 +60,7 @@ OKRUN_IMAGE_ABI kal_intptr own_kal_env_arg(kal_uintptr i, char* out, kal_uintptr
     return give(a, length(a), out, cap);
 }
 OKRUN_IMAGE_ABI kal_intptr own_kal_env_image(char* out, kal_uintptr cap) {
+    if (state().carried) return kal_env_image(out, cap);
     return state().name ? give(state().name, length(state().name), out, cap) : -kal_err_not_found;
 }
 // The program that runs the image: the runner's own image, as the process's

@@ -196,6 +196,7 @@ extern "C" int okrun_run_bytes(const void* bytes, unsigned long long size, const
     state().argc = argc;
     state().argv = argv;
     state().name = name;
+    state().carried = options && options->carried;
 
     okld_host host{};
     host.reserve = &reserve; host.publish = &publish; host.release = &release;

@@ -8,6 +8,7 @@ struct image_state {
     int                argc = 0;
     const char* const* argv = nullptr;
     const char*        name = nullptr;
+    bool               carried = false;   // okrun_options::carried
 };
 image_state& state();
 

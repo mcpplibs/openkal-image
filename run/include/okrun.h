@@ -17,6 +17,10 @@ struct okrun_options {
     unsigned              trusted_count;
     /* Announce the image to a debugger (GDB JIT interface). */
     int                   debugger;
+    /* The image is carried inside the program that runs it (a self-contained
+     * program, M3): the image's own name (kal_env_image) is that program's,
+     * and so is what starts the same program again. */
+    int                   carried;
 };
 
 /* Runs an image that lies in memory. `name' is what the image is told its
