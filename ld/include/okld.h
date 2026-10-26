@@ -89,7 +89,10 @@ void okld_public_key(const unsigned char seed[32], unsigned char key[32]);
 
 /* What the loader asks of whoever holds the implementation. A runner fills it
  * from openkal.exec and its binding of names; a C library's `dlopen' fills it
- * from the same interface beneath itself. */
+ * from the same interface beneath itself. The loader keeps the pointer for the
+ * life of every module loaded with it and calls through it again when the
+ * module is unloaded, so the structure outlives them (a static one, in
+ * practice). */
 struct okld_host {
     void*     (*reserve)(okld_size bytes, void* ctx);                         /* kal_exec_alloc */
     int       (*publish)(void* region, okld_size offset, okld_size size, void* ctx); /* kal_exec_publish_part */
