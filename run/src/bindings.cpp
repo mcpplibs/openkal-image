@@ -53,14 +53,21 @@ kal_intptr give(const char* v, kal_uintptr n, char* out, kal_uintptr cap) {
 }
 kal_uintptr length(const char* s) { kal_uintptr n = 0; while (s && s[n]) ++n; return n; }
 
-OKRUN_IMAGE_ABI kal_uintptr own_kal_env_arg_count(void) { return static_cast<kal_uintptr>(state().argc); }
+// A library loaded into a program of this system (okrun_open_library) was
+// started by nothing this runner entered: its arguments and its name are the
+// program's.
+OKRUN_IMAGE_ABI kal_uintptr own_kal_env_arg_count(void) {
+    if (!state().started) return kal_env_arg_count();
+    return static_cast<kal_uintptr>(state().argc);
+}
 OKRUN_IMAGE_ABI kal_intptr own_kal_env_arg(kal_uintptr i, char* out, kal_uintptr cap) {
+    if (!state().started) return kal_env_arg(i, out, cap);
     if (i >= static_cast<kal_uintptr>(state().argc)) return -kal_err_not_found;
     const char* a = state().argv[i];
     return give(a, length(a), out, cap);
 }
 OKRUN_IMAGE_ABI kal_intptr own_kal_env_image(char* out, kal_uintptr cap) {
-    if (state().carried) return kal_env_image(out, cap);
+    if (state().carried || !state().started) return kal_env_image(out, cap);
     return state().name ? give(state().name, length(state().name), out, cap) : -kal_err_not_found;
 }
 // The program that runs the image: the runner's own image, as the process's

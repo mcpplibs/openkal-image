@@ -1,11 +1,14 @@
-// okrun --- runs an ok image: `okrun [options] image [arguments...]'.
+// okrun --- runs an ok image, or an okb (docs/okb.md): `okrun [options] image
+// [arguments...]'. An okb runs this machine's architecture's entry.
 //
 //   --require-signature   refuse an image that is not signed
 //   --trust <hex>         a public key (64 hexadecimal digits) whose images run;
 //                         given at least once, an image signed by another is refused
 //   --debugger            announce the image to gdb and lldb (GDB JIT interface)
 //
-// The image is told its arguments are the image's name and what follows it.
+// The image is told its arguments are the image's (or the okb's) name and what
+// follows it. The images it needs are found beside it, in `lib/<arch>/' and
+// `lib/' there, and in OKRUN_PATH.
 #include <okrun.h>
 #include <openkal.h>
 
@@ -39,7 +42,7 @@ int main(int argc, char** argv) {
     }
     options.trusted = keys;
     if (i >= argc) {
-        say("usage: okrun [--require-signature] [--trust <hex>]... [--debugger] image [arguments...]\n");
+        say("usage: okrun [--require-signature] [--trust <hex>]... [--debugger] image|okb [arguments...]\n");
         return 2;
     }
     char why[512];

@@ -8,6 +8,12 @@
 //   okld keygen <seed-file>        a new seed, written; prints its public key
 //   okld inspect <image>           what the image is
 //   okld note-source               the assembly that lays down the two notes, for the link
+//   okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>...
+//                                  an okb (docs/okb.md): the images, by architecture, and
+//                                  okb.json; with --sign, each image and okb.json signed
+//   okld bundle check <file.okb> [--require-signature] [--trust <hex>]...
+//                                  every member stored, every image aligned, every digest,
+//                                  signature and image of the okb; one line per violation
 //
 // It does not link: an image is linked by an ordinary linker (`ld.lld -shared').
 import std;
@@ -66,11 +72,270 @@ int check(const std::vector<unsigned char>& image) {
     return failures == 0 ? 0 : 1;
 }
 
+// --- okb (docs/okb.md) ---------------------------------------------------------
+
+std::string json_string(std::string_view v) {
+    std::string out = "\"";
+    for (char c : v) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) out += std::format("\\u{:04x}", static_cast<unsigned>(c));
+                else out += c;
+        }
+    }
+    return out + "\"";
+}
+
+std::string base_name(const std::string& path) {
+    const auto at = path.find_last_of("/\\");
+    return at == std::string::npos ? path : path.substr(at + 1);
+}
+
+int bundle(const std::vector<std::string>& args) {
+    // okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>...
+    if (args.size() < 3) { std::println(std::cerr, "usage: okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>..."); return 2; }
+    const std::string out = args[1];
+    std::string name, version, entry, seed_file;
+    std::vector<std::string> paths;
+    for (std::size_t i = 2; i < args.size(); ++i) {
+        const auto& a = args[i];
+        auto value = [&](std::string& into) {
+            if (i + 1 >= args.size()) { std::println(std::cerr, "okld: {} needs a value", a); return false; }
+            into = args[++i];
+            return true;
+        };
+        if (a == "--name") { if (!value(name)) return 2; }
+        else if (a == "--version") { if (!value(version)) return 2; }
+        else if (a == "--entry") { if (!value(entry)) return 2; }
+        else if (a == "--sign") { if (!value(seed_file)) return 2; }
+        else if (a.starts_with("--")) { std::println(std::cerr, "okld: unknown option {}", a); return 2; }
+        else paths.push_back(a);
+    }
+    if (paths.empty()) { std::println(std::cerr, "okld: an okb holds at least one image"); return 2; }
+    std::optional<std::vector<unsigned char>> seed;
+    if (!seed_file.empty()) {
+        seed = read_file(seed_file);
+        if (!seed || seed->size() != 32) { std::println(std::cerr, "okld: {} is not a 32-byte seed", seed_file); return 1; }
+    }
+
+    // The images, by architecture and name: each one an image of the format,
+    // noted, of an architecture the format fixes a convention for.
+    struct image { std::string arch, file; std::vector<unsigned char> bytes; };
+    std::map<std::string, image> members;   // "<arch>/<file>" -> image, in order
+    for (const auto& path : paths) {
+        auto bytes = read_file(path);
+        if (!bytes) { std::println(std::cerr, "okld: {} cannot be read", path); return 1; }
+        okld_info info{};
+        okld_why why{};
+        if (okld_read(bytes->data(), bytes->size(), &info, &why) != 0) { std::println(std::cerr, "okld: {}: {}", path, why.text); return 1; }
+        if (!info.has_requirements) { std::println(std::cerr, "okld: {}: no requirements note; `okld note' it first", path); return 1; }
+        const char* arch = okld_okb_arch_of(info.machine);
+        if (!arch) { std::println(std::cerr, "okld: {}: an architecture okb has no directory for", path); return 1; }
+        const auto file = base_name(path);
+        if (!file.ends_with(".oke") && !file.ends_with(".okso")) { std::println(std::cerr, "okld: {}: an image is named <name>.oke or <name>.okso", path); return 1; }
+        if (seed && okld_sign(bytes->data(), bytes->size(), seed->data(), &why) != 0) { std::println(std::cerr, "okld: {}: {}", path, why.text); return 1; }
+        const auto key = std::format("{}/{}", arch, file);
+        if (members.contains(key)) { std::println(std::cerr, "okld: two images are {}", key); return 1; }
+        members[key] = image{ arch, file, std::move(*bytes) };
+    }
+    std::set<std::string> archs;
+    for (const auto& [k, m] : members) archs.insert(m.arch);
+    if (entry.empty())
+        for (const auto& [k, m] : members) if (m.file.ends_with(".oke")) { entry = m.file; break; }
+    if (entry.empty()) { std::println(std::cerr, "okld: no .oke among the images, and no --entry"); return 1; }
+    for (const auto& a : archs)
+        if (!members.contains(a + "/" + entry)) { std::println(std::cerr, "okld: the architecture {} has no {}", a, entry); return 1; }
+    if (name.empty()) name = entry.substr(0, entry.rfind('.'));
+
+    // okb.json: keys in a fixed order, files by member name.
+    std::string json = std::format("{{\n  \"okb\": {},\n  \"name\": {},\n", okld::okb_version, json_string(name));
+    if (!version.empty()) json += std::format("  \"version\": {},\n", json_string(version));
+    json += std::format("  \"entry\": {},\n  \"architectures\": {{\n", json_string(entry));
+    {
+        std::size_t i = 0;
+        for (const auto& a : archs)
+            json += std::format("    {}: {{ \"dir\": {}, \"entry\": {} }}{}\n", json_string(a), json_string(a),
+                                json_string(entry), ++i == archs.size() ? "" : ",");
+    }
+    json += "  },\n  \"files\": {\n";
+    {
+        std::size_t i = 0;
+        for (const auto& [k, m] : members) {
+            unsigned char d[32];
+            okld_sha256(m.bytes.data(), m.bytes.size(), d);
+            json += std::format("    {}: {{ \"sha256\": \"{}\", \"size\": {} }}{}\n", json_string(k), hex(d, 32),
+                                m.bytes.size(), ++i == members.size() ? "" : ",");
+        }
+    }
+    json += "  }\n}\n";
+
+    std::array<unsigned char, 96> signature{};
+    std::vector<okld_zip_input> in;
+    in.push_back({ "okb.json", json.data(), json.size(), 0 });
+    if (seed) {
+        okld_public_key(seed->data(), signature.data());
+        okld_sign_message(seed->data(), json.data(), json.size(), signature.data() + 32);
+        in.push_back({ "okb.sig", signature.data(), signature.size(), 0 });
+    }
+    for (const auto& [k, m] : members) in.push_back({ k.c_str(), m.bytes.data(), m.bytes.size(), 1 });
+    const okld_u64 need = okld_zip_write(in.data(), in.size(), okld::okb_alignment, nullptr, 0);
+    std::vector<unsigned char> archive(need);
+    okld_zip_write(in.data(), in.size(), okld::okb_alignment, archive.data(), archive.size());
+    if (!write_file(out, archive)) { std::println(std::cerr, "okld: {} cannot be written", out); return 1; }
+    std::println("{}: okb {}, {}, {} architecture(s), {} image(s){}, {} bytes", out, okld::okb_version, name,
+                 archs.size(), members.size(), seed ? ", signed" : "", archive.size());
+    return 0;
+}
+
+int bundle_check(const std::vector<std::string>& args) {
+    // okld bundle check <file.okb> [--require-signature] [--trust <hex>]...
+    if (args.size() < 3) { std::println(std::cerr, "usage: okld bundle check <file.okb> [--require-signature] [--trust <hex>]..."); return 2; }
+    const std::string path = args[2];
+    bool require = false;
+    std::vector<std::array<unsigned char, 32>> trusted;
+    for (std::size_t i = 3; i < args.size(); ++i) {
+        if (args[i] == "--require-signature") { require = true; continue; }
+        if (args[i] == "--trust" && i + 1 < args.size() && args[i + 1].size() == 64) {
+            std::array<unsigned char, 32> k{};
+            for (int b = 0; b < 32; ++b) k[b] = static_cast<unsigned char>(std::stoi(args[i + 1].substr(2 * b, 2), nullptr, 16));
+            trusted.push_back(k);
+            ++i;
+            continue;
+        }
+        std::println(std::cerr, "okld: unknown option {}", args[i]);
+        return 2;
+    }
+    if (!trusted.empty()) require = true;
+    auto bytes = read_file(path);
+    if (!bytes) { std::println(std::cerr, "okld: {} cannot be read", path); return 1; }
+    const auto& a = *bytes;
+    int failures = 0;
+    auto fail = [&](std::string s) { std::println(std::cerr, "okld: {}: {}", path, s); ++failures; };
+    auto is_trusted = [&](const unsigned char* k) {
+        if (trusted.empty()) return true;
+        for (const auto& t : trusted) if (std::equal(t.begin(), t.end(), k)) return true;
+        return false;
+    };
+
+    // The members, as the central directory states them.
+    std::vector<okld_zip_member> list;
+    okld_why why{};
+    if (okld_zip_each(a.data(), a.size(), [](const okld_zip_member* m, void* c) -> int {
+            static_cast<std::vector<okld_zip_member>*>(c)->push_back(*m);
+            return 0;
+        }, &list, &why) != 0) {
+        fail(why.text);
+        return 1;
+    }
+    auto member_name = [](const okld_zip_member& m) { return std::string(m.name, m.name_len); };
+    const okld_zip_member* json = nullptr;
+    const okld_zip_member* sig = nullptr;
+    for (const auto& m : list) {
+        if (member_name(m) == "okb.json") json = &m;
+        if (member_name(m) == "okb.sig") sig = &m;
+        if (m.method != 0 || m.size != m.original) fail(std::format("{}: not stored", member_name(m)));
+    }
+    if (!json) { fail("no okb.json"); return 1; }
+    if (okld_okb_admit(a.data(), a.size(), json, nullptr, 0, &why) != 0) { fail(why.text); return 1; }
+    const auto* text = a.data() + json->data;
+    okld_okb_manifest manifest{};
+    if (okld_okb_read_manifest(text, json->size, &manifest, &why) != 0) { fail(why.text); return 1; }
+
+    // The manifest's signature.
+    if (sig) {
+        if (sig->size != 96) fail("okb.sig is not 96 bytes (a key and a signature)");
+        else if (okld_okb_admit(a.data(), a.size(), sig, nullptr, 0, &why) != 0) fail(why.text);
+        else {
+            const auto* k = a.data() + sig->data;
+            if (okld_verify_message(k, text, json->size, k + 32) != 1) fail("the signature of okb.json does not hold");
+            else if (!is_trusted(k)) fail(std::format("okb.json is signed by {}, which is not trusted", hex(k, 32)));
+        }
+    } else if (require) {
+        fail("okb.json is not signed (no okb.sig), and a signature is required");
+    }
+
+    // Every stated file is a member, and every member but the manifest's own is stated.
+    std::set<std::string> stated;
+    okld_okb_each_file(text, json->size, [](const char* n, okld_size l, void* c) -> int {
+        static_cast<std::set<std::string>*>(c)->insert(std::string(n, l));
+        return 0;
+    }, &stated);
+    std::set<std::string> present;
+    for (const auto& m : list) present.insert(member_name(m));
+    for (const auto& f : stated) if (!present.contains(f)) fail(std::format("okb.json states {}, which the archive does not hold", f));
+
+    // Each image: admitted (stored, aligned, its stated content), of its
+    // directory's architecture, signed where asked, and following the
+    // convention with the exports of its directory's other images.
+    // An image refused here is still counted among its directory's exports,
+    // so that one refusal is reported once and not again by each image that
+    // needs it.
+    std::map<std::string, std::vector<const okld_zip_member*>> by_dir;
+    std::set<const okld_zip_member*> refused;
+    for (const auto& m : list) {
+        const auto n = member_name(m);
+        if (n == "okb.json" || n == "okb.sig" || n.ends_with("/")) continue;
+        if (okld_okb_admit(a.data(), a.size(), &m, text, json->size, &why) != 0) { fail(why.text); refused.insert(&m); }
+        if (!okld_okb_is_image(n.data(), n.size())) continue;
+        const auto slash = n.find('/');
+        by_dir[slash == std::string::npos ? std::string() : n.substr(0, slash)].push_back(&m);
+    }
+    for (const auto& arch : std::span(manifest.archs, manifest.arch_count)) {
+        const std::string entry = std::format("{}/{}", arch.dir, arch.entry);
+        if (!present.contains(entry)) fail(std::format("the entry of {}, {}, is not a member", arch.name, entry));
+    }
+    for (const auto& [dir, images] : by_dir) {
+        const okld_okb_arch* arch = nullptr;
+        for (const auto& x : std::span(manifest.archs, manifest.arch_count)) if (dir == x.dir) arch = &x;
+        g_elsewhere.clear();
+        for (const auto* m : images)
+            okld_exports(a.data() + m->data, m->size, [](const char* n, void*) { g_elsewhere.insert(n); }, nullptr);
+        for (const auto* m : images) {
+            if (refused.contains(m)) continue;
+            const auto n = member_name(*m);
+            const auto* image = a.data() + m->data;
+            okld_info info{};
+            if (okld_read(image, m->size, &info, &why) != 0) { fail(std::format("{}: {}", n, why.text)); continue; }
+            const char* machine = okld_okb_arch_of(info.machine);
+            if (!arch) fail(std::format("{}: in {}/, which okb.json names no architecture for", n, dir));
+            else if (!machine || std::string_view(machine) != arch->name)
+                fail(std::format("{}: an image of {}, in the directory of {}", n, machine ? machine : "another architecture", arch->name));
+            unsigned char key[32];
+            const int v = okld_verify(image, m->size, key);
+            if (v < 0) fail(std::format("{}: its signature does not hold", n));
+            else if (v == 0 && require) fail(std::format("{}: not signed, and a signature is required", n));
+            else if (v == 1 && !is_trusted(key)) fail(std::format("{}: signed by {}, which is not trusted", n, hex(key, 32)));
+            struct ctx { std::string* name; int* failures; const std::string* path; } c{ const_cast<std::string*>(&n), &failures, &path };
+            okld_check(image, m->size,
+                [](const char* x, void*) { return surface().contains(x) ? 1 : 0; },
+                [](const char* x, void*) { return g_elsewhere.contains(x) ? 1 : 0; },
+                [](const char* sentence, void* p) {
+                    auto& c = *static_cast<ctx*>(p);
+                    std::println(std::cerr, "okld: {}: {}: {}", *c.path, *c.name, sentence);
+                    ++*c.failures;
+                }, &c);
+        }
+    }
+    if (failures == 0) {
+        std::string archs_text;
+        for (const auto& x : std::span(manifest.archs, manifest.arch_count))
+            archs_text += std::format("{}{} ({} image(s))", archs_text.empty() ? "" : ", ", x.name, by_dir[x.dir].size());
+        std::println("{}: okb {}, {}{}; {}; every member holds{}", path, manifest.okb, manifest.name,
+                     manifest.version[0] ? std::format(" {}", manifest.version) : std::string(), archs_text,
+                     sig ? ", signed" : "");
+    }
+    return failures == 0 ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     const std::vector<std::string> args(argv + 1, argv + argc);
-    auto usage = [] { std::println(std::cerr, "usage: okld check|note|inspect <image> | sign <image> <seed-file> | keygen <seed-file> | note-source"); return 2; };
+    auto usage = [] { std::println(std::cerr, "usage: okld check|note|inspect <image> | sign <image> <seed-file> | keygen <seed-file> | note-source | bundle <out.okb> <image>... | bundle check <file.okb>"); return 2; };
     if (args.empty()) return usage();
     const auto& verb = args[0];
 
@@ -95,6 +360,8 @@ int main(int argc, char** argv) {
         std::println("{}", hex(key, 32));
         return 0;
     }
+    if (verb == "bundle" && args.size() >= 2 && args[1] == "check") return bundle_check(args);
+    if (verb == "bundle") return bundle(args);
     if (args.size() < 2) return usage();
     auto image = read_file(args[1]);
     if (!image) { std::println(std::cerr, "okld: {} cannot be read", args[1]); return 1; }

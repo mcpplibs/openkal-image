@@ -9,6 +9,9 @@ struct image_state {
     const char* const* argv = nullptr;
     const char*        name = nullptr;
     bool               carried = false;   // okrun_options::carried
+    // An image was entered. Before it is (a library loaded into a program of
+    // this system), its arguments and name are the program's own.
+    bool               started = false;
 };
 image_state& state();
 

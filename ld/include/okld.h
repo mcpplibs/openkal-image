@@ -85,6 +85,105 @@ int okld_verify(const void* bytes, okld_size size, unsigned char key[32]);
 
 void okld_public_key(const unsigned char seed[32], unsigned char key[32]);
 
+/* Ed25519 over a message that is not an image: the okb manifest's signature
+ * (docs/okb.md). `okld_verify_message' returns 1 when the signature holds and
+ * a negative value otherwise. */
+void okld_sign_message(const unsigned char seed[32], const void* msg, okld_size size,
+                       unsigned char signature[64]);
+int  okld_verify_message(const unsigned char key[32], const void* msg, okld_size size,
+                         const unsigned char signature[64]);
+
+/* --- digests ------------------------------------------------------------- */
+
+void     okld_sha256(const void* bytes, okld_size size, unsigned char out[32]);
+/* The CRC-32 of ZIP (ISO 3309), continued from `crc' (0 to begin). */
+okld_u32 okld_crc32(okld_u32 crc, const void* bytes, okld_size size);
+
+/* --- ZIP archives and okb v1 (docs/okb.md) -------------------------------- */
+
+#define OKLD_OKB_VERSION   1u
+#define OKLD_OKB_ALIGNMENT 65536u
+
+/* A member of a ZIP archive that lies in memory. `name' points into the
+ * archive and is not terminated. `data' is the offset of its bytes, found
+ * through its local header. */
+struct okld_zip_member {
+    const char* name;
+    okld_size   name_len;
+    okld_u64    header;     /* offset of the local header */
+    okld_u64    data;       /* offset of the bytes */
+    okld_u64    size;       /* bytes as stored */
+    okld_u64    original;   /* bytes as extracted */
+    okld_u32    method;     /* 0: stored */
+    okld_u32    crc32;
+};
+
+/* Each member, in the central directory's order; `each' returns non-zero to
+ * stop, and that value is returned. Returns 0 when every member was given, or
+ * a negative value with `why' filled when the archive is malformed. ZIP64 is
+ * read. */
+int okld_zip_each(const void* archive, okld_u64 size,
+                  int (*each)(const struct okld_zip_member* member, void* ctx), void* ctx,
+                  struct okld_why* why);
+/* The member of a name: 0 found, 1 absent, negative when malformed. */
+int okld_zip_find(const void* archive, okld_u64 size, const char* name,
+                  struct okld_zip_member* out, struct okld_why* why);
+
+/* A member to write: stored; when `align' is not zero its bytes begin at a
+ * multiple of the archive's alignment. */
+struct okld_zip_input {
+    const char* name;
+    const void* bytes;
+    okld_u64    size;
+    int         align;
+};
+/* Writes a ZIP archive of the members, in order, into `out' and returns its
+ * size; when `out' is null or `cap' is smaller, writes nothing and returns
+ * the size it needs. Deterministic: no time is read. The padding is a field
+ * of the member's local header (id 0x6b6f: the alignment, then zeros), or,
+ * where fewer than eight bytes are wanted, bytes between members. ZIP64 is
+ * written when a size, an offset or the count needs it. */
+okld_u64 okld_zip_write(const struct okld_zip_input* members, okld_size count, okld_u32 alignment,
+                        void* out, okld_u64 cap);
+
+/* An architecture of the manifest: its name (`x86_64', `aarch64'), the
+ * directory of its images, and the image it enters. */
+struct okld_okb_arch {
+    char name[16];
+    char dir[64];
+    char entry[128];
+};
+/* What `okb.json' states. An architecture without `dir' takes its name, and
+ * one without `entry' takes the bundle's. */
+struct okld_okb_manifest {
+    okld_u32             okb;            /* the version of okb */
+    char                 name[128];
+    char                 version[64];
+    char                 entry[128];
+    struct okld_okb_arch archs[8];
+    okld_u32             arch_count;
+};
+int okld_okb_read_manifest(const void* json, okld_size size, struct okld_okb_manifest* out,
+                      struct okld_why* why);
+/* The SHA-256 the manifest states for a member (`files.<member>.sha256'):
+ * 1 found, 0 absent, negative when the manifest cannot be read. */
+int okld_okb_digest(const void* json, okld_size size, const char* member, unsigned char out[32]);
+/* Each member the manifest states a file for (`files.<member>'), in order;
+ * `each' returns non-zero to stop, and that value is returned. Negative when
+ * the manifest cannot be read. */
+int okld_okb_each_file(const void* json, okld_size size,
+                       int (*each)(const char* name, okld_size name_len, void* ctx), void* ctx);
+/* Whether a member is an image (`.oke', `.okso'), whose bytes are aligned. */
+int okld_okb_is_image(const char* name, okld_size name_len);
+/* A member admitted for use: stored, an image's bytes at a multiple of
+ * OKLD_OKB_ALIGNMENT, and its content the one `json' states (its SHA-256),
+ * or, with no manifest, the one its CRC-32 states. 0, or negative with `why'
+ * filled. Nothing is copied. */
+int okld_okb_admit(const void* archive, okld_u64 size, const struct okld_zip_member* member,
+                   const void* json, okld_size json_size, struct okld_why* why);
+/* The architecture's name for an ELF machine (62, 183), or null. */
+const char* okld_okb_arch_of(okld_u32 machine);
+
 /* --- loading -------------------------------------------------------------- */
 
 /* What the loader asks of whoever holds the implementation. A runner fills it
