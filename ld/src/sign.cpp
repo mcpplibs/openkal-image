@@ -292,9 +292,10 @@ extern "C" void okld_sha512_for_test(const void* m, okld_size n, unsigned char o
     sha512 s; s.update(static_cast<const u8*>(m), n); s.final(out);
 }
 
-// For the tests of this file: Ed25519 over a plain message (RFC 8032 vectors).
-extern "C" void okld_ed25519_sign_for_test(const unsigned char seed[32], const void* msg, okld_size n,
-                                           unsigned char sig[64]) {
+// Ed25519 over a message that is not an image: the okb manifest's signature
+// (docs/okb.md), and the published vectors (RFC 8032) the tests hold it to.
+extern "C" void okld_sign_message(const unsigned char seed[32], const void* msg, okld_size n,
+                                  unsigned char sig[64]) {
     const u8* m = static_cast<const u8*>(msg);
     u8 d[64], pk[32], r[64], h[64];
     expand(seed, d);
@@ -310,4 +311,25 @@ extern "C" void okld_ed25519_sign_for_test(const unsigned char seed[32], const v
     for (int i = 0; i < 32; ++i) x[i] = r[i];
     for (int i = 0; i < 32; ++i) for (int j = 0; j < 32; ++j) x[i + j] += h[i] * static_cast<i64>(d[j]);
     modL(sig + 32, x);
+}
+
+extern "C" int okld_verify_message(const unsigned char key[32], const void* msg, okld_size n,
+                                   const unsigned char sig[64]) {
+    gf p[4], q[4];
+    if (unpackneg(q, key)) return -1;
+    u8 h[64];
+    { sha512 s; s.update(sig, 32); s.update(key, 32); s.update(static_cast<const u8*>(msg), n); s.final(h); }
+    reduce(h);
+    scalarmult(p, q, h);
+    scalarbase(q, sig + 32);
+    add(p, q);
+    u8 t[32];
+    pack(t, p);
+    return vn(sig, t, 32) == 0 ? 1 : -1;
+}
+
+// For the tests of this file: the same, under the name they were written against.
+extern "C" void okld_ed25519_sign_for_test(const unsigned char seed[32], const void* msg, okld_size n,
+                                           unsigned char sig[64]) {
+    okld_sign_message(seed, msg, n, sig);
 }

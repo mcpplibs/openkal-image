@@ -1,0 +1,9 @@
+import mcpp;
+import mcpp.mcpplibs.openkal_bind;
+
+int main() {
+    return mcpp::mcpplibs::openkal_bind::bind({
+        .header = "include/mathlib.h",
+        .image  = "lib/{arch}/libmathlib.okso",
+    });
+}

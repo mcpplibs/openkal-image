@@ -7,11 +7,17 @@ name: CI
 #              okld; one is signed. libokld's cryptography holds against the
 #              published vectors. The binding list is generated from the
 #              specification's SURFACE.txt at every build (run/build.mcpp).
+#              An okb of both architectures is written by `okld bundle', checked by
+#              `okld bundle check' and by the ZIP tools; libokld's digests, ZIP
+#              reader and writer and manifest reader hold against their vectors.
 #   run        THE SAME BYTES run on every system of their architecture through
 #              okrun built there --- arguments, thread-local storage, a callback
 #              into the image, an image another needs --- and the refusals hold:
 #              an unsigned image where a signature is required, a changed byte,
-#              an untrusted key.
+#              an untrusted key. The okb runs through okrun and from memory; a
+#              program of the system calls an image's library through libokrun
+#              and through the binding openkal-bind generates, and the binding's
+#              refusals hold.
 
 on:
   push:
@@ -63,6 +69,8 @@ jobs:
             grep -q 'openkal.stream' <<<"$req" && ! grep -q 'openkal.net' <<<"$req" \
               || { echo "::error::a weak import made the image require its interface"; exit 1; }
             cp "out/$arch/hello.oke" "out/$arch/signed.oke"
+            # The library examples/bind binds for a program of each system.
+            bash examples/build-image.sh "$arch" "out/$arch/libmathlib.okso" examples/bind/mathlib/image/mathlib.c
           done
           "$OKLD" keygen "$RUNNER_TEMP/seed" > out/key.hex
           for arch in x86_64 aarch64; do
@@ -71,7 +79,45 @@ jobs:
             python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[len(d)//2]^=1; open(sys.argv[2],'wb').write(d)" \
               "out/$arch/signed.oke" "out/$arch/tampered.oke"
           done
-          (cd out && sha256sum */*.oke */*.okso | tee SHA256SUMS)
+          # THE OKB: both architectures in one file.
+          "$OKLD" bundle out/hello.okb --version 0.1.2 out/x86_64/hello.oke out/aarch64/hello.oke
+          "$OKLD" bundle out/needed.okb --entry needed.oke \
+            out/x86_64/needed.oke out/x86_64/liboktwice.okso out/aarch64/needed.oke out/aarch64/liboktwice.okso
+          "$OKLD" bundle out/signed.okb --sign "$RUNNER_TEMP/seed" --entry needed.oke \
+            out/x86_64/needed.oke out/x86_64/liboktwice.okso out/aarch64/needed.oke out/aarch64/liboktwice.okso
+          for okb in hello needed signed; do "$OKLD" bundle check "out/$okb.okb"; done
+          "$OKLD" bundle check out/signed.okb --require-signature --trust "$(cat out/key.hex)"
+          if "$OKLD" bundle check out/hello.okb --require-signature 2> unsigned.txt; then echo "::error::an unsigned okb passed --require-signature"; exit 1; fi
+          grep -q "not signed" unsigned.txt
+          # Any ZIP tool reads it; every image member begins at a multiple of 64 KiB.
+          python3 - out/needed.okb <<'PY'
+          import struct, sys, zipfile
+          z = zipfile.ZipFile(sys.argv[1])
+          assert z.testzip() is None
+          d = open(sys.argv[1], 'rb').read()
+          for i in z.infolist():
+              assert i.compress_type == zipfile.ZIP_STORED, i.filename
+              n, e = struct.unpack('<HH', d[i.header_offset + 26:i.header_offset + 30])
+              if i.filename.endswith(('.oke', '.okso')):
+                  assert (i.header_offset + 30 + n + e) % 65536 == 0, i.filename
+          print('  ok  the okb is a ZIP archive, stored, its images aligned to 64 KiB')
+          PY
+          unzip -t out/needed.okb
+          # A changed byte inside an image member.
+          python3 - out/needed.okb out/tampered.okb <<'PY'
+          import struct, sys, zipfile
+          d = bytearray(open(sys.argv[1], 'rb').read())
+          i = zipfile.ZipFile(sys.argv[1]).getinfo('x86_64/liboktwice.okso')
+          n, e = struct.unpack('<HH', d[i.header_offset + 26:i.header_offset + 30])
+          d[i.header_offset + 30 + n + e + 100] ^= 1
+          i = zipfile.ZipFile(sys.argv[1]).getinfo('aarch64/liboktwice.okso')
+          n, e = struct.unpack('<HH', d[i.header_offset + 26:i.header_offset + 30])
+          d[i.header_offset + 30 + n + e + 100] ^= 1
+          open(sys.argv[2], 'wb').write(d)
+          PY
+          if "$OKLD" bundle check out/tampered.okb 2> tampered.txt; then echo "::error::a changed okb passed bundle check"; exit 1; fi
+          grep -q "sha256" tampered.txt
+          (cd out && sha256sum */*.oke */*.okso *.okb | tee SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with: { name: images, path: out/ }
 
@@ -116,6 +162,8 @@ jobs:
           okrun=$(find "$PWD/target" -path '*bin*' \( -name okrun -o -name okrun.exe \) -type f | head -1)
           [ -n "$okrun" ] || { echo "::error::okrun did not build"; exit 1; }
           echo "OKRUN=$okrun" >> "$GITHUB_ENV"
+          okld=$(find "$PWD/target" -path '*bin*' \( -name okld -o -name okld.exe \) -type f | head -1)
+          echo "OKLD_HOST=$okld" >> "$GITHUB_ENV"
       - name: The same bytes
         run: |
           a='${{ matrix.arch }}'
@@ -144,3 +192,45 @@ jobs:
           if "$OKRUN" --trust 00000000000000000000000000000000000000000000000000000000000000aa "out/$a/signed.oke" 2> e3.txt; then echo "::error::an untrusted key's image ran"; exit 1; fi
           grep -q "not trusted" e3.txt
           echo "  ok  unsigned, changed and untrusted images are refused, and say why"
+      - name: The okb, through okrun
+        run: |
+          key=$(cat out/key.hex)
+          out=$("$OKRUN" out/hello.okb one two | tr -d '\r')
+          echo "$out"
+          grep -q "argc as kal_env_arg_count = 3" <<<"$out" || { echo "::error::the okb's entry and arguments"; exit 1; }
+          n=$("$OKRUN" out/needed.okb | tr -d '\r')
+          grep -q "twice(21) = 42, next_value() = 41" <<<"$n" || { echo "::error::an image the okb's entry needs, from the okb"; exit 1; }
+          "$OKRUN" --require-signature --trust "$key" out/signed.okb > /dev/null || { echo "::error::a signed okb was refused"; exit 1; }
+          if "$OKRUN" --require-signature out/needed.okb 2> e4.txt; then echo "::error::an unsigned okb ran under --require-signature"; exit 1; fi
+          grep -q "okb.json is not signed" e4.txt
+          if "$OKRUN" out/tampered.okb 2> e5.txt; then echo "::error::a changed okb ran"; exit 1; fi
+          grep -q "sha256" e5.txt
+          # An image the okb does not hold is found in OKRUN_PATH.
+          mkdir -p path/${{ matrix.arch }}
+          cp out/${{ matrix.arch }}/liboktwice.okso path/${{ matrix.arch }}/
+          "$OKLD_HOST" bundle alone.okb --entry needed.oke out/${{ matrix.arch }}/needed.oke
+          if "$OKRUN" alone.okb 2> e6.txt; then echo "::error::a needed image that is nowhere was found"; exit 1; fi
+          # The system's own spelling of a directory list: `;' and a drive on Windows.
+          sep=':'; here="$PWD"
+          if [ "$RUNNER_OS" = Windows ]; then sep=';'; here=$(pwd -W); fi
+          OKRUN_PATH="nowhere${sep}${here}/path" "$OKRUN" alone.okb | tr -d '\r' | grep -q "twice(21) = 42" \
+            || { echo "::error::OKRUN_PATH"; exit 1; }
+          echo "  ok  the okb runs; an unsigned or changed okb is refused; OKRUN_PATH is searched"
+      - name: From memory, and a library from a program of this system (libokrun)
+        run: |
+          (cd examples/host && mcpp build --release)
+          host=$(find "$PWD/examples/host/target" -path '*bin*' \( -name okrun-host -o -name okrun-host.exe \) -type f | head -1)
+          a='${{ matrix.arch }}'
+          "$host" library "out/$a/liboktwice.okso" | tr -d '\r' | tee lib.txt
+          grep -q "library: twice(21) = 42, next_value() = 41, 42" lib.txt || { echo "::error::okrun_open_library"; exit 1; }
+          "$host" okb out/needed.okb | tr -d '\r' | grep -q "twice(21) = 42" || { echo "::error::okrun_run_okb_bytes"; exit 1; }
+          "$host" images "out/$a/needed.oke" "out/$a/liboktwice.okso" | tr -d '\r' | grep -q "twice(21) = 42" || { echo "::error::okrun_run_images"; exit 1; }
+          echo "  ok  an okb and a group of images run from memory; a library's exports are called from here"
+      - name: The binding openkal-bind generates
+        run: |
+          for a in x86_64 aarch64; do mkdir -p "examples/bind/mathlib/lib/$a"; cp "out/$a/libmathlib.okso" "examples/bind/mathlib/lib/$a/"; done
+          (cd examples/bind/app && mcpp run) | tr -d '\r' | tee bind.txt
+          for want in "add: 42" "scale: 6.00" "mirror: -3 7" "length: 7" "each: 4 visited, sum 10"; do
+            grep -q "$want" bind.txt || { echo "::error::the binding: $want"; exit 1; }
+          done
+          bash examples/bind/check-refusals.sh

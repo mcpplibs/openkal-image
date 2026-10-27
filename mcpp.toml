@@ -1,5 +1,7 @@
 # mcpplibs/openkal-image: the reference loader, runner and tools of the ok
-# format (openkal SPEC clause 12). Three packages, one version: a library's
-# target and a program cannot share a name in one package (`okld').
+# format (openkal SPEC clause 12), the okb bundle (docs/okb.md), and the build
+# plugin that binds an image's library for a program of any system
+# (docs/bind.md). Four packages, one version: a library's target and a program
+# cannot share a name in one package (`okld').
 [workspace]
-members = ["ld", "run", "tools"]
+members = ["ld", "run", "tools", "bind"]

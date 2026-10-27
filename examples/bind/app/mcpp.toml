@@ -1,0 +1,7 @@
+# A program of this system that uses mathlib as it would any C library.
+[package]
+name    = "bind-app"
+version = "0.1.0"
+
+[dependencies]
+mathlib = { path = "../mathlib" }

@@ -1,0 +1,22 @@
+# mathlib, as a program of any system uses it: the header, the image of each
+# architecture, and a binding mcpplibs.openkal-bind generates from the header
+# (build.mcpp). The image itself is built from image/mathlib.c for
+# <arch>-openkal and placed at lib/<arch>/libmathlib.okso.
+[package]
+name    = "mathlib"
+version = "0.1.0"
+
+[targets.mathlib]
+kind = "lib"
+
+[build]
+sources      = []
+include_dirs = ["include"]
+
+# The binding calls libokrun, on every system but openkal, where a program
+# links the image itself.
+[target.'cfg(not(os = "openkal"))'.dependencies]
+openkal-run = { path = "../../../run" }
+
+[build-dependencies]
+openkal-bind = { path = "../../../bind" }

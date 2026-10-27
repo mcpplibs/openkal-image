@@ -1,0 +1,10 @@
+# A program of this system that uses images through libokrun (part 2 design
+# §4, §8): a library's exports called from native code, an okb run from the
+# bytes of memory, and a group of images run from memory. CI runs it on every
+# system of each architecture with the images built once.
+[package]
+name    = "okrun-host"
+version = "0.1.2"
+
+[dependencies]
+openkal-run = { path = "../../run" }
