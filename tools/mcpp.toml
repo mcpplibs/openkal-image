@@ -1,7 +1,7 @@
 [package]
 namespace   = "mcpplibs"
 name        = "openkal-tools"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "okrun, which runs an ok image on this system, and okld, the format's tool on a build machine (check, note, sign, inspect)."
 license     = "Apache-2.0"
 authors     = ["mcpplibs"]
