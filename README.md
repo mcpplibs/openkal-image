@@ -35,6 +35,7 @@ images are stored and aligned to 64 KiB ([docs/okb.md](docs/okb.md)):
 
 ```sh
 okld bundle app.okb --version 0.1.0 x86_64/app.oke aarch64/app.oke   # okb.json, the images by architecture
+okld bundle app.okb --package target/dist/app-0.1.0-openkal         # or from a package mcpp staged
 okld bundle check app.okb                                            # stored, aligned, digests, signatures
 okrun app.okb arguments...                                           # this machine's architecture's entry
 ```

@@ -120,6 +120,7 @@ has no such interface in version 0.17.
 
 ```
 okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>...
+okld bundle <out.okb> --package <staged-tree> [--sign <seed-file>]
 okld bundle check <file.okb> [--require-signature] [--trust <hex>]...
 ```
 
@@ -127,6 +128,19 @@ okld bundle check <file.okb> [--require-signature] [--trust <hex>]...
 architecture's directory, and writes `okb.json` with the digests; `--sign` signs each image
 and the manifest with one key. The archive is deterministic: no time is recorded, and the same
 images give the same bytes. The entry defaults to the first `.oke` named.
+
+`--package` takes the images from a universal package that mcpp has staged (mcpp SPEC-014 §4.2,
+§4.5), reading `mcpp-package.json` at the root of the tree:
+
+- the images are the files of role `image`, at `lib/<arch>/<file>`;
+- each image's architecture, from its ELF header, must be the one its directory names;
+- its content must be the `sha256` stated for it;
+- each architecture's entry is the file `launch.entry` names for it;
+- the okb's name and version are the package's.
+
+Files of every other role (launchers, loaders, resources, metadata) are not members of a
+version 1 okb. This is the action of the `okb` package format that openkal-platform's plugin
+provides.
 
 `okld bundle check` verifies C1 to C3, the manifest, every digest, every signature (and the
 trust asked for), that each architecture's entry is present, that each image is of its
@@ -148,3 +162,4 @@ exports of the other images of its directory. It prints one line per violation.
 | okb | okrun | Change |
 |---|---|---|
 | 1 | 0.1.2 | This document. |
+| 1 | 0.1.3 | `okld bundle --package`: an okb from a package mcpp staged. |
