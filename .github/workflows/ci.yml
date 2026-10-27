@@ -85,7 +85,14 @@ jobs:
             out/x86_64/needed.oke out/x86_64/liboktwice.okso out/aarch64/needed.oke out/aarch64/liboktwice.okso
           "$OKLD" bundle out/signed.okb --sign "$RUNNER_TEMP/seed" --entry needed.oke \
             out/x86_64/needed.oke out/x86_64/liboktwice.okso out/aarch64/needed.oke out/aarch64/liboktwice.okso
-          for okb in hello needed signed; do "$OKLD" bundle check "out/$okb.okb"; done
+          # From a universal package mcpp staged (mcpp-package.json, SPEC-014 §4.5).
+          python3 examples/package/stage.py staged out
+          "$OKLD" bundle out/package.okb --package staged/tree
+          cp -R staged/tree staged/changed
+          printf 'x' >> staged/changed/lib/x86_64/needed.oke
+          if "$OKLD" bundle out/changed.okb --package staged/changed 2> changed.txt; then echo "::error::a package whose image is not its stated content was bundled"; exit 1; fi
+          grep -q "mcpp-package.json states" changed.txt
+          for okb in hello needed signed package; do "$OKLD" bundle check "out/$okb.okb"; done
           "$OKLD" bundle check out/signed.okb --require-signature --trust "$(cat out/key.hex)"
           if "$OKLD" bundle check out/hello.okb --require-signature 2> unsigned.txt; then echo "::error::an unsigned okb passed --require-signature"; exit 1; fi
           grep -q "not signed" unsigned.txt
@@ -200,6 +207,7 @@ jobs:
           grep -q "argc as kal_env_arg_count = 3" <<<"$out" || { echo "::error::the okb's entry and arguments"; exit 1; }
           n=$("$OKRUN" out/needed.okb | tr -d '\r')
           grep -q "twice(21) = 42, next_value() = 41" <<<"$n" || { echo "::error::an image the okb's entry needs, from the okb"; exit 1; }
+          "$OKRUN" out/package.okb | tr -d '\r' | grep -q "twice(21) = 42" || { echo "::error::the okb of a staged package"; exit 1; }
           "$OKRUN" --require-signature --trust "$key" out/signed.okb > /dev/null || { echo "::error::a signed okb was refused"; exit 1; }
           if "$OKRUN" --require-signature out/needed.okb 2> e4.txt; then echo "::error::an unsigned okb ran under --require-signature"; exit 1; fi
           grep -q "okb.json is not signed" e4.txt
@@ -225,6 +233,13 @@ jobs:
           grep -q "library: twice(21) = 42, next_value() = 41, 42" lib.txt || { echo "::error::okrun_open_library"; exit 1; }
           "$host" okb out/needed.okb | tr -d '\r' | grep -q "twice(21) = 42" || { echo "::error::okrun_run_okb_bytes"; exit 1; }
           "$host" images "out/$a/needed.oke" "out/$a/liboktwice.okso" | tr -d '\r' | grep -q "twice(21) = 42" || { echo "::error::okrun_run_images"; exit 1; }
+          # The archive a program that carries its images holds: no okb.json,
+          # the images at the root, zipalign's field and bytes between members.
+          python3 examples/package/stage.py staged out
+          "$host" archive staged/carried.zip needed.oke | tr -d '\r' | grep -q "twice(21) = 42" || { echo "::error::an archive without okb.json, from memory"; exit 1; }
+          python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[65536+200]^=1; open(sys.argv[2],'wb').write(d)" staged/carried.zip staged/bad.zip
+          if "$host" archive staged/bad.zip needed.oke 2> crc.txt; then echo "::error::a changed member ran"; exit 1; fi
+          grep -q "CRC-32" crc.txt
           echo "  ok  an okb and a group of images run from memory; a library's exports are called from here"
       - name: The binding openkal-bind generates
         run: |

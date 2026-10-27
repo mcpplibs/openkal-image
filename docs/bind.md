@@ -24,10 +24,10 @@ sources      = []
 include_dirs = ["include"]
 
 [target.'cfg(not(os = "openkal"))'.dependencies]
-openkal-run = "0.1.2"
+openkal-run = "0.1.3"
 
 [build-dependencies]
-openkal-bind = "0.1.2"
+openkal-bind = "0.1.3"
 ```
 
 ```cpp
@@ -98,3 +98,4 @@ llvm toolchain's clang converts the call.
 | openkal-bind | Statement |
 |---|---|
 | 0.1.2 | This document. Released with openkal-run 0.1.2, whose library interface it calls. |
+| 0.1.3 | No change of its own; released with the archive. |

@@ -1,5 +1,8 @@
 // okrun-host library <dir>/liboktwice.okso    the library's exports, called from here
 // okrun-host okb <file.okb> [arguments...]     an okb run from the bytes of memory
+// okrun-host archive <file.zip> <entry> [arguments...]
+//                                              an archive of images without okb.json, as a
+//                                              program that carries its images holds one
 // okrun-host images <needed.oke> <liboktwice.okso>
 //                                              a group of images run from memory
 #include <okrun.h>
@@ -32,7 +35,7 @@ std::vector<unsigned char> read(const char* path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3) { std::fprintf(stderr, "usage: okrun-host library <okso> | okb <file.okb> | images <oke> <okso>\n"); return 2; }
+    if (argc < 3) { std::fprintf(stderr, "usage: okrun-host library <okso> | okb <file.okb> | archive <file.zip> <entry> | images <oke> <okso>\n"); return 2; }
     okrun_options options{};
     char why[512];
     if (std::strcmp(argv[1], "library") == 0) {
@@ -52,6 +55,13 @@ int main(int argc, char** argv) {
     if (std::strcmp(argv[1], "okb") == 0) {
         const auto bytes = read(argv[2]);
         okrun_run_okb_bytes(bytes.data(), bytes.size(), nullptr, argc - 2, const_cast<const char* const*>(argv + 2),
+                            &options, why, sizeof why);
+        std::fprintf(stderr, "okrun-host: %s\n", why);
+        return 127;
+    }
+    if (std::strcmp(argv[1], "archive") == 0 && argc >= 4) {
+        const auto bytes = read(argv[2]);
+        okrun_run_okb_bytes(bytes.data(), bytes.size(), argv[3], argc - 3, const_cast<const char* const*>(argv + 3),
                             &options, why, sizeof why);
         std::fprintf(stderr, "okrun-host: %s\n", why);
         return 127;

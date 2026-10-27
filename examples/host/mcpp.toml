@@ -4,7 +4,7 @@
 # system of each architecture with the images built once.
 [package]
 name    = "okrun-host"
-version = "0.1.2"
+version = "0.1.3"
 
 [dependencies]
 openkal-run = { path = "../../run" }

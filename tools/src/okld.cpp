@@ -90,6 +90,104 @@ std::string json_string(std::string_view v) {
     return out + "\"";
 }
 
+// --- JSON, as mcpp writes `mcpp-package.json_value' (mcpp SPEC-014 §4.5) ------------
+
+struct json_value {
+    enum kind_t { null, boolean, number, string, array, object } kind = null;
+    bool b = false;
+    double n = 0;
+    std::string s;
+    std::vector<json_value> items;
+    std::map<std::string, json_value> fields;
+    const json_value* get(std::string_view k) const {
+        auto it = fields.find(std::string(k));
+        return it == fields.end() ? nullptr : &it->second;
+    }
+    std::string str(std::string_view k) const {
+        const json_value* v = get(k);
+        return v && v->kind == string ? v->s : std::string();
+    }
+};
+
+struct json_reader {
+    std::string_view t;
+    std::size_t at = 0;
+    void ws() { while (at < t.size() && std::isspace(static_cast<unsigned char>(t[at]))) ++at; }
+    bool text(std::string& out) {
+        if (at >= t.size() || t[at] != '"') return false;
+        ++at;
+        while (at < t.size() && t[at] != '"') {
+            char c = t[at++];
+            if (c == '\\' && at < t.size()) {
+                const char e = t[at++];
+                switch (e) {
+                    case 'n': c = '\n'; break; case 't': c = '\t'; break; case 'r': c = '\r'; break;
+                    case 'b': c = '\b'; break; case 'f': c = '\f'; break;
+                    case 'u': {
+                        if (at + 4 > t.size()) return false;
+                        const unsigned v = static_cast<unsigned>(std::stoul(std::string(t.substr(at, 4)), nullptr, 16));
+                        at += 4;
+                        if (v < 0x80) { out += static_cast<char>(v); continue; }
+                        if (v < 0x800) { out += static_cast<char>(0xc0 | (v >> 6)); out += static_cast<char>(0x80 | (v & 0x3f)); continue; }
+                        out += static_cast<char>(0xe0 | (v >> 12)); out += static_cast<char>(0x80 | ((v >> 6) & 0x3f));
+                        out += static_cast<char>(0x80 | (v & 0x3f));
+                        continue;
+                    }
+                    default: c = e;
+                }
+            }
+            out += c;
+        }
+        if (at >= t.size()) return false;
+        ++at;
+        return true;
+    }
+    bool value(json_value& v, int depth = 0) {
+        ws();
+        if (at >= t.size() || depth > 64) return false;
+        const char c = t[at];
+        if (c == '{') {
+            v.kind = json_value::object; ++at; ws();
+            if (at < t.size() && t[at] == '}') { ++at; return true; }
+            for (;;) {
+                ws();
+                std::string k;
+                if (!text(k)) return false;
+                ws();
+                if (at >= t.size() || t[at] != ':') return false;
+                ++at;
+                if (!value(v.fields[k], depth + 1)) return false;
+                ws();
+                if (at < t.size() && t[at] == ',') { ++at; continue; }
+                if (at < t.size() && t[at] == '}') { ++at; return true; }
+                return false;
+            }
+        }
+        if (c == '[') {
+            v.kind = json_value::array; ++at; ws();
+            if (at < t.size() && t[at] == ']') { ++at; return true; }
+            for (;;) {
+                v.items.emplace_back();
+                if (!value(v.items.back(), depth + 1)) return false;
+                ws();
+                if (at < t.size() && t[at] == ',') { ++at; continue; }
+                if (at < t.size() && t[at] == ']') { ++at; return true; }
+                return false;
+            }
+        }
+        if (c == '"') { v.kind = json_value::string; return text(v.s); }
+        if (t.substr(at, 4) == "true") { v.kind = json_value::boolean; v.b = true; at += 4; return true; }
+        if (t.substr(at, 5) == "false") { v.kind = json_value::boolean; at += 5; return true; }
+        if (t.substr(at, 4) == "null") { at += 4; return true; }
+        const std::size_t from = at;
+        while (at < t.size() && (std::isdigit(static_cast<unsigned char>(t[at])) || std::string_view("+-.eE").contains(t[at]))) ++at;
+        if (at == from) return false;
+        v.kind = json_value::number;
+        std::from_chars(t.data() + from, t.data() + at, v.n);
+        return true;
+    }
+};
+
 std::string base_name(const std::string& path) {
     const auto at = path.find_last_of("/\\");
     return at == std::string::npos ? path : path.substr(at + 1);
@@ -97,10 +195,16 @@ std::string base_name(const std::string& path) {
 
 int bundle(const std::vector<std::string>& args) {
     // okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>...
-    if (args.size() < 3) { std::println(std::cerr, "usage: okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>..."); return 2; }
+    // okld bundle <out.okb> --package <staged-tree> [--sign <seed-file>]
+    const char* usage = "usage: okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>...\n"
+                        "       okld bundle <out.okb> --package <staged-tree> [--sign <seed-file>]";
+    if (args.size() < 3) { std::println(std::cerr, "{}", usage); return 2; }
     const std::string out = args[1];
-    std::string name, version, entry, seed_file;
+    std::string name, version, entry, seed_file, package;
     std::vector<std::string> paths;
+    std::map<std::string, std::string> expected_arch;    // path -> the architecture its place names
+    std::map<std::string, std::string> stated_digest;    // path -> the sha256 mcpp-package.json states
+    std::map<std::string, std::string> arch_entry;       // architecture -> its entry's file name
     for (std::size_t i = 2; i < args.size(); ++i) {
         const auto& a = args[i];
         auto value = [&](std::string& into) {
@@ -112,8 +216,50 @@ int bundle(const std::vector<std::string>& args) {
         else if (a == "--version") { if (!value(version)) return 2; }
         else if (a == "--entry") { if (!value(entry)) return 2; }
         else if (a == "--sign") { if (!value(seed_file)) return 2; }
+        else if (a == "--package") { if (!value(package)) return 2; }
         else if (a.starts_with("--")) { std::println(std::cerr, "okld: unknown option {}", a); return 2; }
         else paths.push_back(a);
+    }
+    if (!package.empty()) {
+        // A PACKAGE MCPP STAGED (mcpp SPEC-014 §4.5): its images are the files
+        // of role `image', at `lib/<arch>/<file>'; its entry per architecture
+        // is `launch.entry'; its name and version are the package's. Every
+        // other role (launcher, loader, resource, metadata) is not a member of
+        // an okb of this version.
+        if (!paths.empty() || !entry.empty()) { std::println(std::cerr, "okld: --package names the images and the entry; give neither beside it"); return 2; }
+        const std::string at = (std::filesystem::path(package) / "mcpp-package.json").string();
+        auto text = read_file(at);
+        if (!text) { std::println(std::cerr, "okld: {} cannot be read; --package names a tree mcpp staged", at); return 1; }
+        json_value doc;
+        json_reader r{ std::string_view(reinterpret_cast<const char*>(text->data()), text->size()) };
+        if (!r.value(doc) || doc.kind != json_value::object) { std::println(std::cerr, "okld: {} is not a JSON object", at); return 1; }
+        const json_value* schema = doc.get("schema");
+        if (!schema || schema->kind != json_value::number || schema->n != 1) { std::println(std::cerr, "okld: {}: schema {} is not the one this okld reads (1)", at, schema && schema->kind == json_value::number ? std::format("{}", schema->n) : std::string("(none)")); return 1; }
+        if (name.empty()) name = doc.str("name");
+        if (version.empty()) version = doc.str("version");
+        const json_value* launch = doc.get("launch");
+        const json_value* entries = launch ? launch->get("entry") : nullptr;
+        if (!entries || entries->kind != json_value::object || entries->fields.empty()) { std::println(std::cerr, "okld: {}: no launch.entry; the package is not a universal package of images", at); return 1; }
+        for (const auto& [arch, e] : entries->fields) {
+            if (e.kind != json_value::string || !e.s.starts_with("lib/" + arch + "/")) { std::println(std::cerr, "okld: {}: launch.entry.{} is not lib/{}/<image>", at, arch, arch); return 1; }
+            arch_entry[arch] = base_name(e.s);
+        }
+        const json_value* files = doc.get("files");
+        if (!files || files->kind != json_value::array) { std::println(std::cerr, "okld: {}: no files", at); return 1; }
+        for (const auto& f : files->items) {
+            if (f.str("role") != "image") continue;
+            const std::string rel = f.str("path");
+            const auto slash = rel.find('/', 4);
+            if (!rel.starts_with("lib/") || slash == std::string::npos || rel.find('/', slash + 1) != std::string::npos) {
+                std::println(std::cerr, "okld: {}: the image {} is not at lib/<arch>/<file>", at, rel);
+                return 1;
+            }
+            const std::string path = (std::filesystem::path(package) / rel).string();
+            paths.push_back(path);
+            expected_arch[path] = rel.substr(4, slash - 4);
+            if (const auto d = f.str("sha256"); !d.empty()) stated_digest[path] = d;
+        }
+        if (paths.empty()) { std::println(std::cerr, "okld: {}: no file of role `image'", at); return 1; }
     }
     if (paths.empty()) { std::println(std::cerr, "okld: an okb holds at least one image"); return 2; }
     std::optional<std::vector<unsigned char>> seed;
@@ -135,6 +281,15 @@ int bundle(const std::vector<std::string>& args) {
         if (!info.has_requirements) { std::println(std::cerr, "okld: {}: no requirements note; `okld note' it first", path); return 1; }
         const char* arch = okld_okb_arch_of(info.machine);
         if (!arch) { std::println(std::cerr, "okld: {}: an architecture okb has no directory for", path); return 1; }
+        if (auto e = expected_arch.find(path); e != expected_arch.end() && e->second != arch) {
+            std::println(std::cerr, "okld: {}: an image of {}, in the directory of {}", path, arch, e->second);
+            return 1;
+        }
+        if (auto d = stated_digest.find(path); d != stated_digest.end()) {
+            unsigned char have[32];
+            okld_sha256(bytes->data(), bytes->size(), have);
+            if (hex(have, 32) != d->second) { std::println(std::cerr, "okld: {}: its content is not the one mcpp-package.json states (sha256)", path); return 1; }
+        }
         const auto file = base_name(path);
         if (!file.ends_with(".oke") && !file.ends_with(".okso")) { std::println(std::cerr, "okld: {}: an image is named <name>.oke or <name>.okso", path); return 1; }
         if (seed && okld_sign(bytes->data(), bytes->size(), seed->data(), &why) != 0) { std::println(std::cerr, "okld: {}: {}", path, why.text); return 1; }
@@ -144,11 +299,16 @@ int bundle(const std::vector<std::string>& args) {
     }
     std::set<std::string> archs;
     for (const auto& [k, m] : members) archs.insert(m.arch);
+    if (entry.empty() && !arch_entry.empty()) entry = arch_entry.begin()->second;
     if (entry.empty())
         for (const auto& [k, m] : members) if (m.file.ends_with(".oke")) { entry = m.file; break; }
     if (entry.empty()) { std::println(std::cerr, "okld: no .oke among the images, and no --entry"); return 1; }
-    for (const auto& a : archs)
-        if (!members.contains(a + "/" + entry)) { std::println(std::cerr, "okld: the architecture {} has no {}", a, entry); return 1; }
+    for (const auto& a : archs) {
+        if (!arch_entry.contains(a)) arch_entry[a] = entry;
+        if (!members.contains(a + "/" + arch_entry[a])) { std::println(std::cerr, "okld: the architecture {} has no {}", a, arch_entry[a]); return 1; }
+    }
+    for (const auto& [a, e] : arch_entry)
+        if (!archs.contains(a)) { std::println(std::cerr, "okld: an entry is stated for {}, which has no image", a); return 1; }
     if (name.empty()) name = entry.substr(0, entry.rfind('.'));
 
     // okb.json: keys in a fixed order, files by member name.
@@ -159,7 +319,7 @@ int bundle(const std::vector<std::string>& args) {
         std::size_t i = 0;
         for (const auto& a : archs)
             json += std::format("    {}: {{ \"dir\": {}, \"entry\": {} }}{}\n", json_string(a), json_string(a),
-                                json_string(entry), ++i == archs.size() ? "" : ",");
+                                json_string(arch_entry[a]), ++i == archs.size() ? "" : ",");
     }
     json += "  },\n  \"files\": {\n";
     {

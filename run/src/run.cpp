@@ -425,8 +425,12 @@ int run_archive(search& s, const char* entry, const char* name, int argc, const 
     s.refusal[0] = 0;
     const void* bytes = archive_image(s, entry, size);
     if (!bytes) {
-        if (s.refusal[0]) text(why, cap) << name << ": " << s.refusal;
-        else text(why, cap) << name << " has no member " << entry << " (in " << s.arch_dir << "/ or at its root)";
+        // A refusal names the member; the archive is named before it when it
+        // has a name of its own (a file).
+        text t(why, cap);
+        if (!same(name, entry)) t << name << ": ";
+        if (s.refusal[0]) t << s.refusal;
+        else t << "no member " << entry << " (in " << s.arch_dir << "/ or at the root)";
         return -1;
     }
     const bool carried = s.options && s.options->carried;
