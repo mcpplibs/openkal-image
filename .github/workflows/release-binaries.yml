@@ -23,7 +23,9 @@ permissions:
 
 env:
   MCPP_SOURCE_REF: ${{ github.event.inputs.mcpp_ref || vars.MCPP_SOURCE_REF || '' }}
-  MCPP_VERSION: 2026.10.26.2
+  MCPP_VERSION: 2026.10.27.1
+  # The platform whose hosted arrangement the programs are built over.
+  PLATFORM_VERSION: 0.17.3
   XLINGS_VERSION: v2026.10.26.1
   XLINGS_NON_INTERACTIVE: '1'
 
@@ -36,11 +38,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux: static (musl), the one form that runs on every distribution.
-          - { os: ubuntu-24.04,     id: linux-x86_64,   pack: '--linkage static' }
-          - { os: ubuntu-24.04-arm, id: linux-aarch64,  pack: '--linkage static' }
-          - { os: macos-15,         id: macos-aarch64,  pack: '' }
-          - { os: windows-2022,     id: windows-x86_64, pack: '' }
+          # Each system's row over openkal-platform's hosted arrangement (mcpp
+          # SPEC-013 §5.4), as mcpp builds the runner it carries in a
+          # self-contained package: the platform's toolchain, C library and
+          # C++ run-time over the system's openkal implementation -- static on
+          # Linux, no SDK on macOS, no MSVC run-time on Windows.
+          - { os: ubuntu-24.04,     id: linux-x86_64,   pack: '--target x86_64-linux-musl --mode static' }
+          - { os: ubuntu-24.04-arm, id: linux-aarch64,  pack: '--target aarch64-linux-musl --mode static' }
+          - { os: macos-15,         id: macos-aarch64,  pack: '--target aarch64-macos' }
+          - { os: windows-2022,     id: windows-x86_64, pack: '--target x86_64-windows-gnu' }
     defaults:
       run:
         shell: bash
@@ -88,10 +94,25 @@ jobs:
           tag='${{ github.event.inputs.tag }}'
           mkdir -p ../out
           for tool in okrun okld; do
-            mcpp pack "$tool" ${{ matrix.pack }} --pkg-format zip -o "$tool-$tag-${{ matrix.id }}.zip"
+            mcpp pack "$tool" ${{ matrix.pack }} --platform "openkal-platform@$PLATFORM_VERSION" \
+                --pkg-format zip -o "$tool-$tag-${{ matrix.id }}.zip"
             cp "target/dist/$tool-$tag-${{ matrix.id }}.zip" ../out/
           done
           ls -l ../out
+
+      - name: Each program runs here, from its package alone
+        run: |
+          python=python3; [ "$RUNNER_OS" = Windows ] && python=python
+          for tool in okrun okld; do
+            "$python" -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
+                "out/$tool-${{ github.event.inputs.tag }}-${{ matrix.id }}.zip" "$RUNNER_TEMP/x-$tool"
+            exe=$(find "$RUNNER_TEMP/x-$tool" -type f \( -name "$tool" -o -name "$tool.exe" \) | head -1)
+            chmod +x "$exe"
+            # Started with no arguments, each says how it is used: it runs.
+            "$exe" > "$tool.out" 2>&1 || true
+            cat "$tool.out"
+            grep -q "usage: $tool" "$tool.out" || { echo "::error::$tool did not run here"; exit 1; }
+          done
 
       - name: Attached to the release
         env:
