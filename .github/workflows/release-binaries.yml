@@ -103,11 +103,26 @@ jobs:
       - name: Each program runs here, from its package alone
         run: |
           python=python3; [ "$RUNNER_OS" = Windows ] && python=python
+          tag='${{ github.event.inputs.tag }}'
           for tool in okrun okld; do
-            "$python" -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
-                "out/$tool-${{ github.event.inputs.tag }}-${{ matrix.id }}.zip" "$RUNNER_TEMP/x-$tool"
-            exe=$(find "$RUNNER_TEMP/x-$tool" -type f \( -name "$tool" -o -name "$tool.exe" \) | head -1)
-            chmod +x "$exe"
+            root="$RUNNER_TEMP/x-$tool"
+            # Unpacked as an unzip program does it, each file with the mode the
+            # archive states (a program that lost its x bit fails here); the
+            # program is the one the package's mcpp-package.json names.
+            exe=$("$python" - "out/$tool-$tag-${{ matrix.id }}.zip" "$root" <<'PY'
+          import json, os, sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for info in z.infolist():
+                  path = z.extract(info, sys.argv[2])
+                  mode = (info.external_attr >> 16) & 0o777
+                  if mode:
+                      os.chmod(path, mode)
+              top = os.path.commonpath([n for n in z.namelist()]).split("/")[0]
+          d = json.load(open(os.path.join(sys.argv[2], top, "mcpp-package.json")))
+          print(os.path.join(sys.argv[2], top, d["launch"]["program"]).replace("\\", "/"))
+          PY
+            )
+            echo "$tool: $exe"
             # Started with no arguments, each says how it is used: it runs.
             "$exe" > "$tool.out" 2>&1 || true
             cat "$tool.out"
