@@ -23,9 +23,10 @@ permissions:
 
 env:
   MCPP_SOURCE_REF: ${{ github.event.inputs.mcpp_ref || vars.MCPP_SOURCE_REF || '' }}
-  MCPP_VERSION: 2026.10.27.1
-  # The platform whose hosted arrangement the programs are built over.
-  PLATFORM_VERSION: 0.17.3
+  MCPP_VERSION: 2026.10.30.1
+  # The platform whose hosted arrangement the programs are built over: 0.18.0's
+  # version group holds openkal-linux 0.18.3, which this round's tools pin.
+  PLATFORM_VERSION: 0.18.0
   XLINGS_VERSION: v2026.10.26.1
   XLINGS_NON_INTERACTIVE: '1'
 
@@ -71,9 +72,12 @@ jobs:
 
       - name: The mcpp that packs
         run: |
+          # A branch of mcpp is built by the latest released mcpp.
+          want="mcpp@$MCPP_VERSION"
+          [ -n "${MCPP_SOURCE_REF:-}" ] && want=mcpp
           for attempt in 1 2 3 4 5 6; do
             xlings update > /dev/null 2>&1 || true
-            if xlings install "mcpp@$MCPP_VERSION" -y -g; then break; fi
+            if xlings install "$want" -y -g; then break; fi
             [ "$attempt" = 6 ] && { echo "::error::mcpp could not be installed"; exit 1; }
             sleep 60
           done
