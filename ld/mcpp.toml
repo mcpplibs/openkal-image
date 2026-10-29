@@ -1,7 +1,7 @@
 [package]
 namespace   = "mcpplibs"
 name        = "openkal-ld"
-version     = "0.1.3"
+version     = "0.1.4"
 description = "libokld: the ok format (openkal image format) --- its definition, a reader of bytes, a checker, a signer, and a loader. Freestanding: no C library, no exceptions."
 license     = "Apache-2.0"
 authors     = ["mcpplibs"]

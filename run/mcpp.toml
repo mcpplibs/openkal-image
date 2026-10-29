@@ -1,7 +1,7 @@
 [package]
 namespace   = "mcpplibs"
 name        = "openkal-run"
-version     = "0.1.3"
+version     = "0.1.4"
 description = "libokrun: the runner's core --- an ok image's names bound to this process's one openkal implementation, in the image's calling convention, and its entry entered."
 license     = "Apache-2.0"
 authors     = ["mcpplibs"]
@@ -15,7 +15,7 @@ openkal = "0.17.1"
 openkal-ld = { path = "../ld" }
 
 [target.linux.dependencies]
-openkal-linux = "0.18.2"
+openkal-linux = "0.18.3"
 
 [target.macos.dependencies]
 openkal-macos = "0.15.1"
