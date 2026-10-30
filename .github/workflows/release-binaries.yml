@@ -13,6 +13,10 @@ on:
       tag:
         description: "The release tag the binaries are built from and attached to (e.g. 0.1.3)"
         required: true
+      platform:
+        description: "The openkal-platform whose hosted arrangement builds the tools: the one whose version group holds the implementations the tag pins (0.1.5: 0.19.0)"
+        required: true
+        default: "0.19.0"
       mcpp_ref:
         description: "Branch of mcpp-community/mcpp to build with (empty = the released mcpp)"
         required: false
@@ -24,9 +28,11 @@ permissions:
 env:
   MCPP_SOURCE_REF: ${{ github.event.inputs.mcpp_ref || vars.MCPP_SOURCE_REF || '' }}
   MCPP_VERSION: 2026.10.30.1
-  # The platform whose hosted arrangement the programs are built over: 0.18.0's
-  # version group holds openkal-linux 0.18.3, which this round's tools pin.
-  PLATFORM_VERSION: 0.18.0
+  # The platform whose hosted arrangement the programs are built over, named by
+  # the dispatch beside the tag: a tag's tools pin exact implementations, and the
+  # platform is the one whose version group holds them (0.1.4: 0.18.0; 0.1.5:
+  # 0.19.0, openkal-linux 0.19.0).
+  PLATFORM_VERSION: ${{ github.event.inputs.platform }}
   XLINGS_VERSION: v2026.10.26.1
   XLINGS_NON_INTERACTIVE: '1'
 
