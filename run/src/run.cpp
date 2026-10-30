@@ -88,11 +88,37 @@ bool locate(const char* path, kal_dir& dir, const char*& rest) {
     return true;
 }
 
+// A file's bytes: a region of the file (openkal.map), or a buffer it was read
+// into where the file cannot be mapped. `cap' is zero for a region.
 struct file_bytes { unsigned char* data = nullptr; unsigned long long size = 0, cap = 0; };
 
+void release_bytes(unsigned char* data, unsigned long long size, unsigned long long cap) {
+    if (!data) return;
+    if (cap == 0) kal_map_release(data, static_cast<kal_uintptr>(size));
+    else kal_free(data, cap, 16);
+}
+
 void release_file(file_bytes& f) {
-    if (f.data) kal_free(f.data, f.cap, 16);
+    release_bytes(f.data, f.size, f.cap);
     f = {};
+}
+
+// THE FILE IS MAPPED, NOT READ (openkal 0.18). An image or an okb was read
+// whole into a buffer that doubled as it grew and was kept for the life of the
+// program: a 71.5 MB image held 128 MiB of the heap, every page of it resident.
+// A region of the file is resident only where it is touched, and its pages are
+// the file's. Private and writable, so a page the loader writes is copied
+// rather than refused; the file never changes.
+bool map_all(kal_file f, file_bytes& out) {
+    kal_node_info info{};
+    info.self_size = sizeof info;
+    if (kal_fs_file_info(f, KAL_INFO_SIZE, &info) != kal_ok || info.size == 0) return false;
+    void* p = nullptr;
+    if (kal_map_file(f, 0, static_cast<kal_uintptr>(info.size), KAL_MAP_WRITE, &p) != kal_ok) return false;
+    out.data = static_cast<unsigned char*>(p);
+    out.size = info.size;
+    out.cap = 0;
+    return true;
 }
 
 bool read_all(const char* path, file_bytes& out, char* why, unsigned long long cap) {
@@ -102,6 +128,7 @@ bool read_all(const char* path, file_bytes& out, char* why, unsigned long long c
     unsigned long n = length(rest);
     kal_file f{};
     if (kal_fs_open(dir, rest, n, KAL_OPEN_READ, &f) != kal_ok) { text(why, cap) << path << " cannot be opened"; return false; }
+    if (map_all(f, out)) { kal_fs_close_file(f); return true; }
     const kal_stream s = kal_fs_stream(f);
     for (;;) {
         if (out.size == out.cap) {
@@ -530,8 +557,8 @@ extern "C" int okrun_run_images(const okrun_image* images, unsigned long count, 
 struct okrun_library {
     okld_module*  module = nullptr;
     search        s;
-    unsigned char* bytes = nullptr;   // a file's, read here
-    unsigned long long cap = 0;
+    unsigned char* bytes = nullptr;   // a file's, mapped or read here
+    unsigned long long size = 0, cap = 0;
 };
 
 namespace {
@@ -561,7 +588,7 @@ okrun_library* new_library(const okrun_options* options) {
 
 void free_library(okrun_library* lib) {
     if (!lib) return;
-    if (lib->bytes) kal_free(lib->bytes, lib->cap, 16);
+    release_bytes(lib->bytes, lib->size, lib->cap);
     kal_free(lib, sizeof(okrun_library), 16);
 }
 
@@ -591,6 +618,7 @@ extern "C" okrun_library* okrun_open_library(const char* path, const okrun_optio
     }
     directory_of(found, lib->s.directory, sizeof lib->s.directory);
     lib->bytes = f.data;
+    lib->size = f.size;
     lib->cap = f.cap;
     if (!open_loaded(lib, f.data, f.size, found, why, cap)) { free_library(lib); return nullptr; }
     return lib;
