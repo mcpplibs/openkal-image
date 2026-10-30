@@ -24,10 +24,10 @@ sources      = []
 include_dirs = ["include"]
 
 [target.'cfg(not(os = "openkal"))'.dependencies]
-openkal-run = "0.1.4"
+openkal-run = "0.1.5"
 
 [build-dependencies]
-openkal-bind = "0.1.4"
+openkal-bind = "0.1.5"
 ```
 
 ```cpp
@@ -100,3 +100,4 @@ llvm toolchain's clang converts the call.
 | 0.1.2 | This document. Released with openkal-run 0.1.2, whose library interface it calls. |
 | 0.1.3 | No change of its own; released with the archive. |
 | 0.1.4 | No change of its own; released with the archive, whose runner starts programs in a directory it may search but not read (openkal-linux 0.18.3). |
+| 0.1.5 | No change of its own; released with the archive, whose runner maps an image or okb file rather than reading it whole, and binds `openkal.map` for images (openkal 0.18). |
