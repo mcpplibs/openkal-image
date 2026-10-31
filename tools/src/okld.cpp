@@ -327,8 +327,20 @@ int bundle(const std::vector<std::string>& args) {
         for (const auto& [k, m] : members) {
             unsigned char d[32];
             okld_sha256(m.bytes.data(), m.bytes.size(), d);
-            json += std::format("    {}: {{ \"sha256\": \"{}\", \"size\": {} }}{}\n", json_string(k), hex(d, 32),
-                                m.bytes.size(), ++i == members.size() ? "" : ",");
+            // AN IMAGE'S CHUNKS TOO (docs/okb.md, 0.1.8): a runner verifies them
+            // in parallel, where one SHA-256 of the whole cannot be shared out.
+            std::string chunks;
+            if (okld_okb_is_image(k.data(), k.size())) {
+                chunks = std::format(",\n      \"chunks\": {{ \"size\": {}, \"sha256\": [", okld::okb_chunk);
+                for (std::size_t at = 0; at < m.bytes.size(); at += okld::okb_chunk) {
+                    unsigned char c[32];
+                    okld_sha256(m.bytes.data() + at, std::min<std::size_t>(okld::okb_chunk, m.bytes.size() - at), c);
+                    chunks += std::format("{}\"{}\"", at ? ", " : " ", hex(c, 32));
+                }
+                chunks += " ] }";
+            }
+            json += std::format("    {}: {{ \"sha256\": \"{}\", \"size\": {}{} }}{}\n", json_string(k), hex(d, 32),
+                                m.bytes.size(), chunks, ++i == members.size() ? "" : ",");
         }
     }
     json += "  }\n}\n";
@@ -440,6 +452,12 @@ int bundle_check(const std::vector<std::string>& args) {
         const auto n = member_name(m);
         if (n == "okb.json" || n == "okb.sig" || n.ends_with("/")) continue;
         if (okld_okb_admit(a.data(), a.size(), &m, text, json->size, &why) != 0) { fail(why.text); refused.insert(&m); }
+        // The chunks a runner verifies instead, where they are stated: both
+        // digests hold, or the okb is refused (docs/okb.md, 0.1.8).
+        else if (okld_okb_admit_chunked(a.data(), a.size(), &m, text, json->size, nullptr, nullptr, &why) != 0) {
+            fail(why.text);
+            refused.insert(&m);
+        }
         if (!okld_okb_is_image(n.data(), n.size())) continue;
         const auto slash = n.find('/');
         by_dir[slash == std::string::npos ? std::string() : n.substr(0, slash)].push_back(&m);

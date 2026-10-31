@@ -161,5 +161,59 @@ int main() {
     check(okld_okb_read_manifest(later, std::strlen(later), &man, &why) < 0
           && std::strstr(why.text, "later version"), "a later okb version is refused");
     check(okld_okb_read_manifest("{\"okb\": 1, \"entry\": ", 20, &man, &why) < 0, "a truncated manifest is refused");
+
+    // CHUNK DIGESTS (0.1.8): an image's chunks are verified instead of its
+    // whole digest, one after another or as the caller runs them.
+    {
+        std::string big(2 * OKLD_OKB_CHUNK + OKLD_OKB_CHUNK / 2, '\0');
+        for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<char>((i * 131) % 251);
+        unsigned char whole[32];
+        okld_sha256(big.data(), big.size(), whole);
+        std::string list;
+        for (std::size_t at = 0; at < big.size(); at += OKLD_OKB_CHUNK) {
+            unsigned char c[32];
+            okld_sha256(big.data() + at, std::min<std::size_t>(OKLD_OKB_CHUNK, big.size() - at), c);
+            list += std::string(at ? ", " : "") + "\"" + hex(c, 32) + "\"";
+        }
+        const auto chunked = [&](const std::string& chunks) {
+            return "{\"okb\": 1, \"entry\": \"big.oke\", \"architectures\": {\"x86_64\": {}},\n"
+                   " \"files\": {\"x86_64/big.oke\": {\"sha256\": \"" + hex(whole, 32) + "\", \"size\": "
+                   + std::to_string(big.size()) + chunks + "}}}";
+        };
+        const std::string with = chunked(", \"chunks\": {\"size\": " + std::to_string(OKLD_OKB_CHUNK) + ", \"sha256\": [" + list + "]}");
+        okld_u64 chunk = 0;
+        int counted = 0;
+        check(okld_okb_chunks(with.data(), with.size(), "x86_64/big.oke", &chunk, [](okld_u64, const unsigned char*, void* c) -> int {
+                  ++*static_cast<int*>(c);
+                  return 0;
+              }, &counted) == 1 && chunk == OKLD_OKB_CHUNK && counted == 3, "the manifest states three chunks of 1 MiB");
+        const auto pack = [&](const std::string& json, const std::string& image) {
+            return write({ { "okb.json", json.data(), json.size(), 0 }, { "x86_64/big.oke", image.data(), image.size(), 1 } });
+        };
+        const auto admit = [&](const std::vector<unsigned char>& a, const std::string& json, okld_parallel run, okld_why* w) {
+            okld_zip_member m{};
+            if (okld_zip_find(a.data(), a.size(), "x86_64/big.oke", &m, w) != 0) return -2;
+            return okld_okb_admit_chunked(a.data(), a.size(), &m, json.data(), json.size(), run, nullptr, w);
+        };
+        const auto good = pack(with, big);
+        check(admit(good, with, nullptr, &why) == 0, "its chunks hold, one after another");
+        int jobs_run = 0;
+        static int* seen = nullptr;
+        seen = &jobs_run;
+        check(admit(good, with, [](void (*job)(okld_u64, void*), okld_u64 n, void* c, void*) {
+                  for (okld_u64 i = n; i-- > 0;) { job(i, c); ++*seen; }
+              }, &why) == 0 && jobs_run == 3, "and as the caller runs them, in any order");
+        std::string changed = big;
+        changed[2 * OKLD_OKB_CHUNK + 7] ^= 1;
+        check(admit(pack(with, changed), with, nullptr, &why) < 0 && std::strstr(why.text, "chunk"),
+              "a changed byte in the last chunk is refused, naming a chunk");
+        const std::string short_list = chunked(", \"chunks\": {\"size\": " + std::to_string(OKLD_OKB_CHUNK) + ", \"sha256\": ["
+                                               + list.substr(0, list.rfind(',')) + "]}");
+        check(admit(pack(short_list, big), short_list, nullptr, &why) < 0 && std::strstr(why.text, "cover"),
+              "chunks that do not cover the member are refused");
+        const std::string without = chunked("");
+        check(admit(pack(without, big), without, nullptr, &why) == 0, "without chunks, the whole digest is verified");
+        check(admit(pack(without, changed), without, nullptr, &why) < 0, "and refuses a changed byte");
+    }
     return failures;
 }

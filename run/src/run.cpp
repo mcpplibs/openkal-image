@@ -266,12 +266,36 @@ bool join(char* out, unsigned long cap, const char* a, const char* b, const char
     return true;
 }
 
+// THE CHUNKS OF A MEMBER ARE DIGESTED ON SEVERAL CONTEXTS AT ONCE (okb.json's
+// `chunks', 0.1.8): libokld has no contexts of its own and asks for these. The
+// calling context runs the first job; one that cannot be started runs here too.
+struct chunk_task { void (*job)(okld_u64, void*); okld_u64 index; void* ctx; };
+void run_chunk_task(void* p) {
+    auto* t = static_cast<chunk_task*>(p);
+    t->job(t->index, t->ctx);
+}
+void in_parallel(void (*job)(okld_u64, void*), okld_u64 count, void* ctx, void*) {
+    constexpr okld_u64 kMost = 16;
+    chunk_task tasks[kMost];
+    kal_task started[kMost];
+    bool running[kMost] = {};
+    for (okld_u64 i = 1; i < count && i < kMost; ++i) {
+        tasks[i] = { job, i, ctx };
+        running[i] = kal_task_start(&run_chunk_task, &tasks[i], &started[i]) == kal_ok;
+        if (!running[i]) job(i, ctx);
+    }
+    for (okld_u64 i = kMost; i < count; ++i) job(i, ctx);
+    if (count) job(0, ctx);
+    for (okld_u64 i = 1; i < count && i < kMost; ++i)
+        if (running[i]) kal_task_join(started[i]);
+}
+
 // A member of the archive by name, admitted (stored, aligned, its stated content).
 const void* archive_member(search& s, const char* member, unsigned long long& size) {
     okld_zip_member m{};
     okld_why why{};
     if (okld_zip_find(s.archive, s.archive_size, member, &m, &why) != 0) return nullptr;
-    if (okld_okb_admit(s.archive, s.archive_size, &m, s.json, s.json_size, &why) != 0) {
+    if (okld_okb_admit_chunked(s.archive, s.archive_size, &m, s.json, s.json_size, &in_parallel, nullptr, &why) != 0) {
         copy_text(s.refusal, sizeof s.refusal, why.text);
         return nullptr;
     }

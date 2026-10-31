@@ -181,6 +181,27 @@ int okld_okb_is_image(const char* name, okld_size name_len);
  * filled. Nothing is copied. */
 int okld_okb_admit(const void* archive, okld_u64 size, const struct okld_zip_member* member,
                    const void* json, okld_size json_size, struct okld_why* why);
+/* THE CHUNK DIGESTS okb.json may state for a member (`files.<member>.chunks',
+ * docs/okb.md, version 0.1.8): the SHA-256 of each `size' bytes of it in
+ * order, the last as long as what remains. 1 when they are stated, each given
+ * to `each' (which returns non-zero to stop), and `*chunk_size' set; 0 when
+ * not; negative when the manifest cannot be read. */
+int okld_okb_chunks(const void* json, okld_size json_size, const char* member, okld_u64* chunk_size,
+                    int (*each)(okld_u64 index, const unsigned char digest[32], void* ctx), void* ctx);
+/* Jobs run by the caller's means, all of them, before it returns: job(i, ctx)
+ * for each i below `count'. A loader has no threads of its own; a runner
+ * gives it its own (okrun: openkal tasks). */
+typedef void (*okld_parallel)(void (*job)(okld_u64 index, void* ctx), okld_u64 count, void* ctx, void* host);
+/* okld_okb_admit, but where the manifest states the member's chunk digests
+ * they are what is verified, as `parallel' runs them (null: one after
+ * another), instead of the SHA-256 of the whole: a member's admission is as
+ * fast as the processors together, where SHA-256 of one stream is not. With
+ * no chunks stated it is okld_okb_admit. */
+int okld_okb_admit_chunked(const void* archive, okld_u64 size, const struct okld_zip_member* member,
+                           const void* json, okld_size json_size, okld_parallel parallel, void* host,
+                           struct okld_why* why);
+/* The chunk size `okld bundle' writes. */
+#define OKLD_OKB_CHUNK 1048576u
 /* The architecture's name for an ELF machine (62, 183), or null. */
 const char* okld_okb_arch_of(okld_u32 machine);
 

@@ -68,6 +68,8 @@ its header and calls it, on openkal and on every other system alike ([docs/bind.
   the binding `openkal-bind` generates (including a callback); the boundary's refusals hold.
 - Once an image is loaded, the runner maps neither it nor the okb it came from, and holds its
   segments once (Linux, from the process's mappings).
+- An okb states its images' chunk digests, which okrun verifies on several contexts and
+  `okld bundle check` beside the whole digest; a changed byte is refused by either.
 - libokld's SHA-256, CRC-32, ZIP reader and writer (with ZIP64) and manifest reader hold
   against their vectors and refusals.
 

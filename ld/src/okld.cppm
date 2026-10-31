@@ -50,6 +50,9 @@ export using ::okld_okb_digest;
 export using ::okld_okb_each_file;
 export using ::okld_okb_is_image;
 export using ::okld_okb_admit;
+export using ::okld_okb_chunks;
+export using ::okld_okb_admit_chunked;
+export using ::okld_parallel;
 export using ::okld_okb_arch_of;
 
 export namespace okld {
@@ -57,4 +60,5 @@ inline constexpr okld_u32 format_major = OKLD_FORMAT_MAJOR;
 inline constexpr okld_u32 format_minor = OKLD_FORMAT_MINOR;
 inline constexpr okld_u32 okb_version = OKLD_OKB_VERSION;
 inline constexpr okld_u32 okb_alignment = OKLD_OKB_ALIGNMENT;
+inline constexpr okld_u32 okb_chunk = OKLD_OKB_CHUNK;
 }
