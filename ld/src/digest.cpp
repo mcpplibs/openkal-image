@@ -5,13 +5,14 @@
 //
 // A runner digests every image it admits from an okb each time it starts one,
 // so SHA-256 runs on the processor's own instructions where it has them: the
-// SHA extensions on x86_64, found with CPUID, and the SHA-256 instructions of
-// ARMv8 where the compilation target guarantees them (`__ARM_FEATURE_SHA2',
-// every Apple arm64 processor). Elsewhere the rounds are written out. A 68 MB
-// image took 0.3 to 0.46 s to admit on the CI runners with the rounds alone.
+// SHA extensions on x86_64, found with CPUID; the SHA-256 instructions of ARMv8
+// where the compilation target guarantees them (`__ARM_FEATURE_SHA2', every
+// Apple arm64 processor), and on Linux where the processor's identification
+// register states them. Elsewhere the rounds are written out. A 68 MB image
+// took 0.3 to 0.46 s to admit on the CI runners with the rounds alone.
 #include <okld.h>
 #include "bytes.h"
-#if defined(__aarch64__) && defined(__ARM_FEATURE_SHA2)
+#if defined(__aarch64__) && (defined(__ARM_FEATURE_SHA2) || defined(__linux__))
 #include <arm_neon.h>
 #endif
 
@@ -79,10 +80,39 @@ __attribute__((target("sha"))) void blocks_sha(u32 h[8], const u8* m, u64 count)
     h[0] = abef[3]; h[1] = abef[2]; h[4] = abef[1]; h[5] = abef[0];
     h[2] = cdgh[3]; h[3] = cdgh[2]; h[6] = cdgh[1]; h[7] = cdgh[0];
 }
-#elif defined(__aarch64__) && defined(__ARM_FEATURE_SHA2)
+#elif defined(__aarch64__) && (defined(__ARM_FEATURE_SHA2) || defined(__linux__))
+#if defined(__ARM_FEATURE_SHA2)
 bool sha_instructions() { return true; }
+#define OKLD_SHA2_TARGET
+#else
+// LINUX STATES THE PROCESSOR'S IDENTIFICATION REGISTERS to programs: it traps
+// `mrs' of them and answers with what the processors have in common (4.11,
+// HWCAP_CPUID). Before 4.11 the instruction is undefined, so the kernel's
+// release is asked first, with the system call itself; nothing here asks for a
+// C library. A processor without the instructions (a Cortex-A72 without its
+// cryptographic extension) states 0 and keeps the rounds written out.
+bool kernel_from_4_11() {
+    char u[6][65];
+    register long x8 __asm__("x8") = 160;  // uname
+    register long x0 __asm__("x0") = reinterpret_cast<long>(&u);
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8) : "memory");
+    if (x0 != 0) return false;
+    const char* r = u[2];
+    unsigned major = 0, minor = 0;
+    for (; *r >= '0' && *r <= '9'; ++r) major = major * 10 + unsigned(*r - '0');
+    if (*r == '.') for (++r; *r >= '0' && *r <= '9'; ++r) minor = minor * 10 + unsigned(*r - '0');
+    return major > 4 || (major == 4 && minor >= 11);
+}
+bool sha_instructions() {
+    if (!kernel_from_4_11()) return false;
+    u64 isar0;
+    __asm__("mrs %0, ID_AA64ISAR0_EL1" : "=r"(isar0));
+    return ((isar0 >> 12) & 0xf) >= 1;  // SHA2: SHA256H, SHA256H2, SHA256SU0, SHA256SU1
+}
+#define OKLD_SHA2_TARGET __attribute__((target("arch=armv8-a+sha2")))
+#endif
 
-void blocks_sha(u32 h[8], const u8* m, u64 count) {
+OKLD_SHA2_TARGET void blocks_sha(u32 h[8], const u8* m, u64 count) {
     uint32x4_t abcd = vld1q_u32(h), efgh = vld1q_u32(h + 4);
     for (; count > 0; --count, m += 64) {
         const uint32x4_t abcd_was = abcd, efgh_was = efgh;
