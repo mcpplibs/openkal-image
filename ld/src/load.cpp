@@ -16,7 +16,8 @@ struct okld_module {
     const okld_host*  host = nullptr;
     unsigned char*    base = nullptr;
     elf::u64          span = 0;
-    const elf::phdr*  phdr = nullptr;         // within the mapped image
+    const elf::phdr*  phdr = nullptr;         // within the mapped image, or `own_phdr'
+    elf::phdr*        own_phdr = nullptr;     // the program headers, copied when no segment holds them
     elf::u32          phnum = 0;
     elf::u64          entry = 0;
     char              name[256] = {};
@@ -253,6 +254,16 @@ int relocate(okld_module* m, const view& v, const okld_host* host, okld_why* why
 
 }  // namespace
 
+namespace {
+// A placed module's region, its own program headers and its record.
+void discard(okld_module* m) {
+    const okld_host* host = m->host;
+    if (m->own_phdr) host->free(m->own_phdr, sizeof(elf::phdr) * m->phnum, host->ctx);
+    host->release(m->base, m->span, host->ctx);
+    host->free(m, sizeof *m, host->ctx);
+}
+}  // namespace
+
 extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const okld_host* host,
                          okld_module** out, okld_why* why) {
     view v;
@@ -299,19 +310,31 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
     m->span = round_up(m->span, g);
     m->base = static_cast<unsigned char*>(host->reserve(m->span, host->ctx));
     if (!m->base) { say(why, "the address space for the image could not be reserved"); host->free(m, sizeof *m, host->ctx); return -1; }
-    fill(m->base, 0, m->span);
+    // Each segment is its file bytes and then zeros to its size in memory. What
+    // lies between segments is no segment's and is not written: a page the image
+    // never touches is not made resident.
     for (unsigned k = 0; k < v.eh->phnum; ++k) {
         const auto& p = v.ph[k];
         if (p.type != elf::pt_load) continue;
         if (p.offset + p.filesz > n) { say(why, "a segment extends beyond the file"); host->release(m->base, m->span, host->ctx); host->free(m, sizeof *m, host->ctx); return -1; }
+        if (p.filesz > p.memsz) { say(why, "a segment holds more of the file than its size in memory"); host->release(m->base, m->span, host->ctx); host->free(m, sizeof *m, host->ctx); return -1; }
         copy(m->base + p.vaddr, static_cast<const unsigned char*>(bytes) + p.offset, p.filesz);
+        fill(m->base + p.vaddr + p.filesz, 0, p.memsz - p.filesz);
     }
     m->entry = v.eh->entry;
     m->phnum = v.eh->phnum;
     for (unsigned k = 0; k < v.eh->phnum; ++k)
         if (v.ph[k].type == elf::pt_load && v.eh->phoff >= v.ph[k].offset && v.eh->phoff < v.ph[k].offset + v.ph[k].filesz)
             m->phdr = reinterpret_cast<const elf::phdr*>(m->base + v.ph[k].vaddr + (v.eh->phoff - v.ph[k].offset));
-    if (!m->phdr) m->phdr = v.ph;   // not mapped: the caller's bytes describe it
+    // THE LOADER KEEPS NO POINTER INTO THE CALLER'S BYTES, which the caller may
+    // release once the image is loaded: program headers no segment holds are
+    // copied into the record.
+    if (!m->phdr) {
+        m->own_phdr = static_cast<elf::phdr*>(host->alloc(sizeof(elf::phdr) * m->phnum, host->ctx));
+        if (!m->own_phdr) { say(why, "no memory for the image's program headers"); host->release(m->base, m->span, host->ctx); host->free(m, sizeof *m, host->ctx); return -1; }
+        copy(m->own_phdr, v.ph, sizeof(elf::phdr) * m->phnum);
+        m->phdr = m->own_phdr;
+    }
 
     m->symtab = reinterpret_cast<const elf::sym*>(m->base + v.dynamic(elf::dt_symtab));
     m->strtab = reinterpret_cast<const char*>(m->base + v.dynamic(elf::dt_strtab));
@@ -322,7 +345,7 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
     m->init_array = v.dynamic(elf::dt_init_array); m->init_arraysz = v.dynamic(elf::dt_init_arraysz);
     m->fini_array = v.dynamic(elf::dt_fini_array); m->fini_arraysz = v.dynamic(elf::dt_fini_arraysz);
 
-    if (relocate(m, v, host, why) != 0) { host->release(m->base, m->span, host->ctx); host->free(m, sizeof *m, host->ctx); return -1; }
+    if (relocate(m, v, host, why) != 0) { discard(m); return -1; }
 
     // Publish what executes; the rest stays writable.
     for (unsigned k = 0; k < v.eh->phnum; ++k) {
@@ -331,7 +354,7 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
         const elf::u64 from = round_down(p.vaddr, g), to = round_up(p.vaddr + p.memsz, g);
         if (host->publish(m->base, from, to - from, host->ctx) != 0) {
             say(why, "the environment refused to make the image's instructions executable");
-            host->release(m->base, m->span, host->ctx); host->free(m, sizeof *m, host->ctx);
+            discard(m);
             return -1;
         }
     }
@@ -382,8 +405,7 @@ extern "C" void okld_unload(okld_module* m) {
     unlock();
     withdraw(m);
     for (okld_size k = 0; k < m->needed_count; ++k) okld_unload(m->needed[k]);
-    m->host->release(m->base, m->span, m->host->ctx);
-    m->host->free(m, sizeof *m, m->host->ctx);
+    discard(m);
 }
 
 extern "C" int okld_iterate(int (*each)(void*, const void*, okld_u32, const char*, void*), void* ctx) {

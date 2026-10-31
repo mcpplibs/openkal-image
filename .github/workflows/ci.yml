@@ -71,6 +71,8 @@ jobs:
             cp "out/$arch/hello.oke" "out/$arch/signed.oke"
             # The library examples/bind binds for a program of each system.
             bash examples/build-image.sh "$arch" "out/$arch/libmathlib.okso" examples/bind/mathlib/image/mathlib.c
+            # 8 MiB of the file's bytes, and a sleep: what stays resident once it is loaded.
+            bash examples/build-image.sh "$arch" "out/$arch/resident.oke" examples/resident/app.c
           done
           "$OKLD" keygen "$RUNNER_TEMP/seed" > out/key.hex
           for arch in x86_64 aarch64; do
@@ -81,6 +83,7 @@ jobs:
           done
           # THE OKB: both architectures in one file.
           "$OKLD" bundle out/hello.okb --version 0.1.2 out/x86_64/hello.oke out/aarch64/hello.oke
+          "$OKLD" bundle out/resident.okb out/x86_64/resident.oke out/aarch64/resident.oke
           "$OKLD" bundle out/needed.okb --entry needed.oke \
             out/x86_64/needed.oke out/x86_64/liboktwice.okso out/aarch64/needed.oke out/aarch64/liboktwice.okso
           "$OKLD" bundle out/signed.okb --sign "$RUNNER_TEMP/seed" --entry needed.oke \
@@ -165,6 +168,9 @@ jobs:
           mcpp self config --mirror GLOBAL
           mcpp toolchain install llvm 23.1.3
           mcpp toolchain default "$LLVM"
+          # libokld's vectors on this machine: SHA-256 runs on its own instructions
+          # where it has them (the SHA extensions here, ARMv8's on macOS arm64).
+          (cd ld && mcpp test)
           (cd tools && mcpp build --release)
           okrun=$(find "$PWD/target" -path '*bin*' \( -name okrun -o -name okrun.exe \) -type f | head -1)
           [ -n "$okrun" ] || { echo "::error::okrun did not build"; exit 1; }
@@ -224,6 +230,24 @@ jobs:
           OKRUN_PATH="nowhere${sep}${here}/path" "$OKRUN" alone.okb | tr -d '\r' | grep -q "twice(21) = 42" \
             || { echo "::error::OKRUN_PATH"; exit 1; }
           echo "  ok  the okb runs; an unsigned or changed okb is refused; OKRUN_PATH is searched"
+      - name: What stays resident once an image is loaded (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # The runner releases the file it ran once the image is placed: while the
+          # image runs, the process maps neither the image nor the okb, and holds
+          # the 8 MiB segment once, as its copy.
+          for f in "out/${{ matrix.arch }}/resident.oke" out/resident.okb; do
+            "$OKRUN" "$f" > resident.txt & pid=$!
+            for i in $(seq 1 50); do grep -q loaded resident.txt 2>/dev/null && break; sleep 0.05; done
+            grep -q "resident: loaded" resident.txt || { echo "::error::$f did not start"; exit 1; }
+            mapped=$(grep -c "resident\.ok" "/proc/$pid/maps" || true)
+            rss=$(awk '/^Rss:/ {print $2}' "/proc/$pid/smaps_rollup")
+            wait "$pid"
+            echo "  $f: mapped $mapped times, $rss KiB resident"
+            [ "$mapped" = 0 ] || { echo "::error::the runner still maps $f while the image runs"; exit 1; }
+            [ "$rss" -lt 14336 ] || { echo "::error::$rss KiB resident for an 8 MiB image: the file's pages beside its copy"; exit 1; }
+          done
+          echo "  ok  once loaded, the image is resident once: the file it came from is released"
       - name: From memory, and a library from a program of this system (libokrun)
         run: |
           (cd examples/host && mcpp build --release)

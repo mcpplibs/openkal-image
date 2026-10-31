@@ -218,7 +218,9 @@ struct okld_module;
 
 /* Maps, relocates and publishes an image and, first, every image it needs.
  * Initialisers are not run: `okld_initialise' runs them, so that a caller can
- * do what it must between. */
+ * do what it must between. The loader keeps no pointer into `bytes', nor into
+ * the bytes `find_needed' gives it: each may be released once the call returns
+ * (version 0.1.6; a runner releases the file it ran). */
 int  okld_load(const void* bytes, okld_size size, const char* name,
                const struct okld_host* host, struct okld_module** out, struct okld_why* why);
 /* Runs the initialisers of the module and of the modules it needs, needed ones

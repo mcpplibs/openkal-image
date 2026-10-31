@@ -38,6 +38,16 @@ int main() {
         okld_sha256(m.data(), m.size(), d);
         check(hex(d, 32) == "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3", "SHA-256 across blocks");
     }
+    {
+        // A million bytes (FIPS 180-4's long message), digested whole and then
+        // from an odd offset, on the processor's instructions where it has them.
+        const std::string m(1000000, 'a');
+        okld_sha256(m.data(), m.size(), d);
+        check(hex(d, 32) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0", "SHA-256 of a million bytes");
+        const std::string shifted = "x" + m;
+        okld_sha256(shifted.data() + 1, m.size(), d);
+        check(hex(d, 32) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0", "SHA-256 of unaligned bytes");
+    }
     check(okld_crc32(0, "123456789", 9) == 0xcbf43926u, "CRC-32 of \"123456789\"");
 
     // An archive: a manifest, two images of two architectures, a shared image.

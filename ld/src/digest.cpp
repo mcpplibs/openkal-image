@@ -2,8 +2,18 @@
 // content, as the manifest states it, and the CRC-32 of the ZIP container,
 // which every ZIP reader checks. Written out, as the rest of this library is:
 // nothing here asks for a C library.
+//
+// A runner digests every image it admits from an okb each time it starts one,
+// so SHA-256 runs on the processor's own instructions where it has them: the
+// SHA extensions on x86_64, found with CPUID, and the SHA-256 instructions of
+// ARMv8 where the compilation target guarantees them (`__ARM_FEATURE_SHA2',
+// every Apple arm64 processor). Elsewhere the rounds are written out. A 68 MB
+// image took 0.3 to 0.46 s to admit on the CI runners with the rounds alone.
 #include <okld.h>
 #include "bytes.h"
+#if defined(__aarch64__) && defined(__ARM_FEATURE_SHA2)
+#include <arm_neon.h>
+#endif
 
 namespace {
 
@@ -24,11 +34,84 @@ constexpr u32 K[64] = {
 
 constexpr u32 rotr(u32 x, int c) { return (x >> c) | (x << (32 - c)); }
 
+// THE PROCESSOR'S INSTRUCTIONS. Each takes the state as h[0..7] and whole
+// 64-byte blocks, and computes what `sha256::block' computes for each.
+#if defined(__x86_64__)
+using v4si = int __attribute__((vector_size(16)));
+using v4su = unsigned __attribute__((vector_size(16)));
+
+bool sha_instructions() {
+    // CPUID leaf 7: SHA (EBX bit 29). The rounds below use SSE2 alone besides.
+    u32 a, b, c, d;
+    __asm__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(0u), "c"(0u));
+    if (a < 7) return false;
+    __asm__("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(7u), "c"(0u));
+    return (b >> 29) & 1u;
+}
+
+__attribute__((target("sha"))) void blocks_sha(u32 h[8], const u8* m, u64 count) {
+    // The instructions hold the state as ABEF and CDGH, A in the highest lane.
+    v4su abef = { h[5], h[4], h[1], h[0] }, cdgh = { h[7], h[6], h[3], h[2] };
+    for (; count > 0; --count, m += 64) {
+        const v4su abef_was = abef, cdgh_was = cdgh;
+        v4su w[16];
+        for (int i = 0; i < 4; ++i) {
+            const u8* q = m + 16 * i;
+            for (int j = 0; j < 4; ++j)
+                w[i][j] = (u32(q[4 * j]) << 24) | (u32(q[4 * j + 1]) << 16) | (u32(q[4 * j + 2]) << 8) | u32(q[4 * j + 3]);
+        }
+        for (int g = 0; g < 16; ++g) {
+            if (g >= 4) {
+                // W[t-16..t-13] + s0, + W[t-7..t-4], then + s1 of W[t-2..t-1].
+                const v4su s0 = (v4su)__builtin_ia32_sha256msg1((v4si)w[g - 4], (v4si)w[g - 3]);
+                const v4su mid = { w[g - 2][1], w[g - 2][2], w[g - 2][3], w[g - 1][0] };
+                w[g] = (v4su)__builtin_ia32_sha256msg2((v4si)(s0 + mid), (v4si)w[g - 1]);
+            }
+            const v4su k = { K[4 * g], K[4 * g + 1], K[4 * g + 2], K[4 * g + 3] };
+            const v4su wk = w[g] + k;
+            cdgh = (v4su)__builtin_ia32_sha256rnds2((v4si)cdgh, (v4si)abef, (v4si)wk);
+            const v4su high = { wk[2], wk[3], 0u, 0u };
+            abef = (v4su)__builtin_ia32_sha256rnds2((v4si)abef, (v4si)cdgh, (v4si)high);
+        }
+        abef += abef_was;
+        cdgh += cdgh_was;
+    }
+    h[0] = abef[3]; h[1] = abef[2]; h[4] = abef[1]; h[5] = abef[0];
+    h[2] = cdgh[3]; h[3] = cdgh[2]; h[6] = cdgh[1]; h[7] = cdgh[0];
+}
+#elif defined(__aarch64__) && defined(__ARM_FEATURE_SHA2)
+bool sha_instructions() { return true; }
+
+void blocks_sha(u32 h[8], const u8* m, u64 count) {
+    uint32x4_t abcd = vld1q_u32(h), efgh = vld1q_u32(h + 4);
+    for (; count > 0; --count, m += 64) {
+        const uint32x4_t abcd_was = abcd, efgh_was = efgh;
+        uint32x4_t w[16];
+        for (int i = 0; i < 4; ++i) w[i] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(m + 16 * i)));
+        for (int g = 0; g < 16; ++g) {
+            if (g >= 4) w[g] = vsha256su1q_u32(vsha256su0q_u32(w[g - 4], w[g - 3]), w[g - 2], w[g - 1]);
+            const uint32x4_t wk = vaddq_u32(w[g], vld1q_u32(K + 4 * g));
+            const uint32x4_t was = abcd;
+            abcd = vsha256hq_u32(abcd, efgh, wk);
+            efgh = vsha256h2q_u32(efgh, was, wk);
+        }
+        abcd = vaddq_u32(abcd, abcd_was);
+        efgh = vaddq_u32(efgh, efgh_was);
+    }
+    vst1q_u32(h, abcd);
+    vst1q_u32(h + 4, efgh);
+}
+#else
+bool sha_instructions() { return false; }
+void blocks_sha(u32*, const u8*, u64) {}
+#endif
+
 struct sha256 {
     u32 h[8] = { 0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
                  0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u };
     u8  buf[64];
     u64 held = 0, total = 0;
+    bool fast = sha_instructions();
 
     void block(const u8* m) {
         u32 w[64];
@@ -50,11 +133,19 @@ struct sha256 {
     void update(const u8* m, u64 n) {
         total += n;
         while (n > 0) {
-            if (held == 0 && n >= 64) { block(m); m += 64; n -= 64; continue; }
+            if (held == 0 && n >= 64) {
+                if (fast) {
+                    const u64 whole = n / 64;
+                    blocks_sha(h, m, whole);
+                    m += whole * 64; n -= whole * 64;
+                    continue;
+                }
+                block(m); m += 64; n -= 64; continue;
+            }
             const u64 take = (64 - held) < n ? (64 - held) : n;
             for (u64 i = 0; i < take; ++i) buf[held + i] = m[i];
             held += take; m += take; n -= take;
-            if (held == 64) { block(buf); held = 0; }
+            if (held == 64) { if (fast) blocks_sha(h, buf, 1); else block(buf); held = 0; }
         }
     }
     void final(u8 out[32]) {
