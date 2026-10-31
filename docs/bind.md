@@ -24,10 +24,10 @@ sources      = []
 include_dirs = ["include"]
 
 [target.'cfg(not(os = "openkal"))'.dependencies]
-openkal-run = "0.1.7"
+openkal-run = "0.1.8"
 
 [build-dependencies]
-openkal-bind = "0.1.7"
+openkal-bind = "0.1.8"
 ```
 
 ```cpp
@@ -103,3 +103,4 @@ llvm toolchain's clang converts the call.
 | 0.1.5 | No change of its own; released with the archive, whose runner maps an image or okb file rather than reading it whole, and binds `openkal.map` for images (openkal 0.18). |
 | 0.1.6 | No change of its own; released with the archive, whose runner releases the file it ran once the image is loaded, and whose loader digests on the processor's SHA-256 instructions and writes each segment once. |
 | 0.1.7 | No change of its own; released with the archive, whose loader also digests on ARMv8's SHA-256 instructions on Linux where the processor states them. |
+| 0.1.8 | No change of its own; released with the archive, built against openkal 0.19.0 (the runner binds `kal_task_cores` and `kal_task_set_priority`), whose okb carries chunk digests the runner verifies on several contexts at once. |

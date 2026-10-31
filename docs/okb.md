@@ -74,6 +74,7 @@ A JSON object (RFC 8259) in UTF-8. Names are ASCII.
 | `entry` | The image entered, by its name within an architecture's directory. An architecture without its own `entry` takes this one. |
 | `architectures` | One object per architecture the okb holds, keyed by the architecture's name. `dir` is the directory of its images (default: the architecture's name); `entry` is the image it enters. At least one architecture is required. |
 | `files` | One object per member other than `okb.json` and `okb.sig`, keyed by the member's name. `sha256` is the SHA-256 of its content (64 hexadecimal digits); `size` is its length in bytes. |
+| `files.<member>.chunks` | Optional (okrun 0.1.8). `size` is a chunk's length in bytes, and `sha256` the SHA-256 of each `size` bytes of the member in order, the last as long as what remains; there are exactly as many as the member's size needs. `okld bundle` writes them for every image, in chunks of 1 MiB. A reader that verifies them need not digest the whole, and can verify them at once on several processors, where one SHA-256 of the whole cannot be shared out; a reader that does not know them verifies `sha256`, as before. |
 
 Unknown keys are ignored, so that a later minor addition does not need a new `okb` number.
 
@@ -97,7 +98,7 @@ A reader that runs an okb:
 3. selects the architecture of the machine it runs on, and refuses an okb that holds none for
    it, naming the architectures it holds;
 4. admits each member it uses: stored (C1), an image's bytes aligned (C2), and its SHA-256 the
-   one `files` states. A member that does not hold is refused; a reader does not decompress,
+   one `files` states --- or, where `files` states its chunks, each chunk's (§3). A member that does not hold is refused; a reader does not decompress,
    realign or copy a member to make it hold;
 5. resolves the entry and each image an image needs (DT_NEEDED) in this order:
    1. the architecture's directory, then the archive's root;
@@ -163,3 +164,4 @@ exports of the other images of its directory. It prints one line per violation.
 |---|---|---|
 | 1 | 0.1.2 | This document. |
 | 1 | 0.1.3 | `okld bundle --package`: an okb from a package mcpp staged. |
+| 1 | 0.1.8 | `files.<member>.chunks`: an image's chunk digests, written by `okld bundle`, verified by okrun on several contexts at once and by `okld bundle check` beside the whole digest. Still okb 1: a reader that does not know the key ignores it. |
