@@ -1,7 +1,7 @@
 [package]
 namespace   = "mcpplibs"
 name        = "openkal-run"
-version     = "0.1.5"
+version     = "0.1.6"
 description = "libokrun: the runner's core --- an ok image's names bound to this process's one openkal implementation, in the image's calling convention, and its entry entered."
 license     = "Apache-2.0"
 authors     = ["mcpplibs"]

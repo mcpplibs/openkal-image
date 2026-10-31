@@ -6,14 +6,28 @@ namespace okld {
 
 using size = __SIZE_TYPE__;
 
+// `volatile' keeps a compiler from making these calls to memcpy and memset.
+// Eight bytes at a time where both sides are aligned alike, as a segment and
+// its place in memory are (SPEC 12.2): an image's tens of megabytes are copied
+// once for every start.
+using word = unsigned long long __attribute__((may_alias));
+using address = __UINTPTR_TYPE__;
 inline void copy(void* d, const void* s, size n) {
-    auto* a = static_cast<volatile unsigned char*>(d);
+    auto* a = static_cast<unsigned char*>(d);
     const auto* b = static_cast<const unsigned char*>(s);
-    for (size i = 0; i < n; ++i) a[i] = b[i];
+    if (((reinterpret_cast<address>(a) ^ reinterpret_cast<address>(b)) & 7) == 0) {
+        for (; n > 0 && (reinterpret_cast<address>(a) & 7); --n) *static_cast<volatile unsigned char*>(a++) = *b++;
+        for (; n >= 8; n -= 8, a += 8, b += 8)
+            *reinterpret_cast<volatile word*>(a) = *reinterpret_cast<const word*>(b);
+    }
+    for (; n > 0; --n) *static_cast<volatile unsigned char*>(a++) = *b++;
 }
 inline void fill(void* d, unsigned char v, size n) {
-    auto* a = static_cast<volatile unsigned char*>(d);
-    for (size i = 0; i < n; ++i) a[i] = v;
+    auto* a = static_cast<unsigned char*>(d);
+    for (; n > 0 && (reinterpret_cast<address>(a) & 7); --n) *static_cast<volatile unsigned char*>(a++) = v;
+    const word w = 0x0101010101010101ull * v;
+    for (; n >= 8; n -= 8, a += 8) *reinterpret_cast<volatile word*>(a) = w;
+    for (; n > 0; --n) *static_cast<volatile unsigned char*>(a++) = v;
 }
 inline bool equal(const char* a, const char* b) {
     for (;; ++a, ++b) { if (*a != *b) return false; if (!*a) return true; }

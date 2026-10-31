@@ -237,7 +237,20 @@ struct search {
     // Why the last image asked for was not given, when it was found and refused.
     char refusal[256] = {};
     okld_host host{};
+    // THE FILES THIS SEARCH HOLDS, released once the loader is done with them
+    // (it keeps no pointer into an image's bytes): the file run, and each file
+    // read for an image another needs until the loader gives it back.
+    file_bytes ran{};
+    file_bytes needed[16] = {};
 };
+
+// The file a run's image or okb was read from, given back once the image is
+// loaded: its pages are no longer resident beside the image's own.
+void release_ran(search& s) {
+    if (!s.ran.data) return;
+    if (s.archive == s.ran.data) { s.archive = nullptr; s.archive_size = 0; s.json = nullptr; s.json_size = 0; }
+    release_file(s.ran);
+}
 
 bool join(char* out, unsigned long cap, const char* a, const char* b, const char* c = nullptr) {
     unsigned long at = 0;
@@ -341,16 +354,23 @@ const void* find_needed(const char* name, okld_size* size, void* ctx) {
         if (f.data) release_file(f);
         return nullptr;
     }
+    if (f.data) {
+        // Held until the loader gives the bytes back (`release_needed').
+        file_bytes* slot = nullptr;
+        for (auto& h : s.needed) if (!h.data) { slot = &h; break; }
+        if (!slot) { release_file(f); copy_text(s.refusal, sizeof s.refusal, "more than sixteen files are needed at once"); return nullptr; }
+        *slot = f;
+    }
     *size = n;
     return bytes;
 }
 
+// A file `find_needed' read is released with the size and capacity it was
+// read with; the archive's and the group's bytes are not this search's.
 void release_needed(const void* bytes, okld_size, void* ctx) {
-    // A file read by `find_needed' was allocated with its capacity, which is
-    // not known here; the loader's record does not point into the bytes, so
-    // they are kept rather than released with a wrong size. A module needed by
-    // several is read once.
-    (void)bytes; (void)ctx;
+    auto& s = *static_cast<search*>(ctx);
+    for (auto& h : s.needed)
+        if (h.data && h.data == bytes) { release_file(h); return; }
 }
 
 void prepare_host(search& s) {
@@ -387,6 +407,7 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     }
     void* entry = okld_entry(m);
     if (!entry) { text(why, cap) << name << ": the image has no entry"; return -1; }
+    release_ran(s);
     okld_initialise(m, &call_image, nullptr);
     const int status = reinterpret_cast<image_main>(entry)();
     okld_finalise(m, &call_image, nullptr);
@@ -518,7 +539,10 @@ extern "C" int okrun_run_file(const char* path, int argc, const char* const* arg
                               const okrun_options* options, char* why, unsigned long long cap) {
     file_bytes f;
     if (!read_all(path, f, why, cap)) return -1;
-    return okrun_run_bytes(f.data, f.size, path, argc, argv, options, why, cap);
+    g_search.ran = f;
+    const int status = okrun_run_bytes(f.data, f.size, path, argc, argv, options, why, cap);
+    release_ran(g_search);
+    return status;
 }
 
 extern "C" int okrun_run_okb_bytes(const void* bytes, unsigned long long size, const char* entry,
@@ -574,6 +598,9 @@ okrun_library* open_loaded(okrun_library* lib, const void* bytes, unsigned long 
         return nullptr;
     }
     okld_initialise(lib->module, &call_image, nullptr);
+    // The file a library was read from is released once it is loaded.
+    release_bytes(lib->bytes, lib->size, lib->cap);
+    lib->bytes = nullptr; lib->size = 0; lib->cap = 0;
     return lib;
 }
 

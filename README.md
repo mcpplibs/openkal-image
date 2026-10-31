@@ -66,6 +66,8 @@ its header and calls it, on openkal and on every other system alike ([docs/bind.
   and an unsigned manifest under `--require-signature` are refused.
 - A program of each system calls an image's library through `okrun_open_library`, and through
   the binding `openkal-bind` generates (including a callback); the boundary's refusals hold.
+- Once an image is loaded, the runner maps neither it nor the okb it came from, and holds its
+  segments once (Linux, from the process's mappings).
 - libokld's SHA-256, CRC-32, ZIP reader and writer (with ZIP64) and manifest reader hold
   against their vectors and refusals.
 
