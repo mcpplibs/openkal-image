@@ -96,6 +96,16 @@ void* okrun_symbol(struct okrun_library* library, const char* name);
  * nothing else holds. */
 void  okrun_close(struct okrun_library* library);
 
+/* --- a measurement (0.2) --------------------------------------------------- */
+
+/* What the next image run is measured for, as OKRUN_PROF would say it: any of
+ * `calls' (each name an image imports is counted with its time), `counters'
+ * (the counters and phases the program registers through openkal.prof) and
+ * `perfmap' (/tmp/perf-<pid>.map, for this system's profiler), separated by
+ * commas, then `:<directory>' for the report (`okprof-<id>.json'). Empty or
+ * null measures nothing. Without a call, OKRUN_PROF is read. */
+void okrun_profile(const char* spec);
+
 /* The names this runner binds (the specification's surface), `count' of them. */
 const char* const* okrun_names(unsigned long* count);
 

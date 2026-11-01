@@ -8,7 +8,7 @@ architecture that has a runner.
 |---|---|---|
 | `openkal-ld` | `libokld` | The format's definition. A reader of bytes, a checker, a signer (Ed25519) and a loader. Freestanding: no C library, no exceptions. Its users are libokrun, `okld`, and a C library's `dlopen`. |
 | `openkal-run` | `libokrun` | The runner's core. It binds an image's names to this process's one openkal implementation, in the image's calling convention, then enters the image. |
-| `openkal-tools` | `okrun`, `okld` | `okrun [--require-signature] [--trust <key>] [--debugger] image\|okb args...` runs an image or an okb. `okld check \| note \| sign \| keygen \| inspect \| note-source \| bundle \| bundle check` works on images and okbs on a build machine. |
+| `openkal-tools` | `okrun`, `okld`, `okprof` | `okrun [--require-signature] [--trust <key>] [--debugger] [--prof=<what>[:dir]] image\|okb args...` runs an image or an okb. `okld check \| note \| sign \| keygen \| inspect \| note-source \| bundle \| bundle check` works on images and okbs on a build machine. `okprof record \| report \| diff` measures what an image did across openkal. |
 | `openkal-bind` | `mcpp.mcpplibs.openkal_bind` | A build plugin. A library published as an image (`.okso`) and a C header is called from a program of Linux, macOS or Windows through a binding generated from the header ([docs/bind.md](docs/bind.md)). |
 
 `libokld` is the loader at run time and `okld` is the tool on the build machine. They share a
@@ -43,6 +43,37 @@ okrun app.okb arguments...                                           # this mach
 The images an image needs are found in the okb, then beside it, in `lib/<arch>/` and `lib/`, and
 in `OKRUN_PATH`. A program that carries its images gives their archive to
 `okrun_run_okb_bytes`, which runs it from memory and writes nothing to disk.
+
+## A measurement of an image
+
+The runner binds every name an image calls across openkal and read the image's file, so it
+measures what the image did there and names its addresses (openkal SPEC 12.3, 0.20):
+
+```sh
+okprof record -o prof -- okrun app.okb arguments...   # or a program that starts an okrun
+okprof report prof                                    # calls by interface and by name; counters; phases
+okprof diff before after                              # the same names, ordered by how their time moved
+```
+
+`okprof record` sets `OKRUN_PROF` (`okrun --prof=` says the same), so every image an okrun
+beneath the program runs writes `okprof-<id>.json` when it ends:
+
+| what | measured |
+|---|---|
+| `calls` | each name the image imports, bound through an entry that counts its calls and their time; an image that is not measured is bound as before and pays nothing |
+| `counters` | the counters and phases the program states through `openkal.prof` (`kal_prof_counter`, `kal_prof_mark`); `kal_prof_active` answers zero when nothing measures |
+| `perfmap` | `/tmp/perf-<pid>.map` on Linux, where `perf` reads the names of an image's addresses; the runner does not sample, the system's profiler does |
+
+`openkal.debug` (`kal_debug_symbolize`) names an address from the symbol table of the image
+that holds it, which the runner reads from the image's file again when it is first asked; the
+table is never placed in memory by loading.
+
+**An okb's admission is remembered.** The first start of an okb compares the images it runs
+with the digests its manifest states; the comparison is then recorded per user (`okrun/admitted`
+in the user's cache directory), keyed by the manifest's SHA-256 and the member, with the file's
+identity, length and modification time. A later start of the same file admits the member by its
+shape alone; a file replaced or changed is compared again. A language server that starts a
+worker per module no longer reads its 146 MB okb at each start.
 
 ## A library from a program of any system
 

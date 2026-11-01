@@ -55,9 +55,10 @@ std::string hex(const unsigned char* p, std::size_t n) {
 
 std::string interfaces(okld_u64 bits) {
     static const char* const names[] = { "abort", "stream", "memory", "env", "time", "random", "fs", "process",
-                                         "task", "exec", "terminal", "net", "datagram", "space", "timeout" };
+                                         "task", "exec", "terminal", "net", "datagram", "space", "timeout",
+                                         "map", "region", "prof", "debug" };
     std::string s;
-    for (int b = 0; b < 15; ++b) if (bits & (1ull << b)) { if (!s.empty()) s += ' '; s += "openkal."; s += names[b]; }
+    for (int b = 0; b < static_cast<int>(sizeof names / sizeof names[0]); ++b) if (bits & (1ull << b)) { if (!s.empty()) s += ' '; s += "openkal."; s += names[b]; }
     return s.empty() ? "none" : s;
 }
 

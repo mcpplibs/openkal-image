@@ -5,6 +5,9 @@
 //   --trust <hex>         a public key (64 hexadecimal digits) whose images run;
 //                         given at least once, an image signed by another is refused
 //   --debugger            announce the image to gdb and lldb (GDB JIT interface)
+//   --prof=<what>[:dir]   measure the image: calls, counters, perfmap (comma
+//                         separated); the report goes to <dir>/okprof-<id>.json,
+//                         which `okprof report' reads (OKRUN_PROF says the same)
 //
 // The image is told its arguments are the image's (or the okb's) name and what
 // follows it. The images it needs are found beside it, in `lib/<arch>/' and
@@ -27,6 +30,8 @@ int main(int argc, char** argv) {
         if (same(argv[i], "--")) { ++i; break; }
         if (same(argv[i], "--require-signature")) { options.require_signature = 1; continue; }
         if (same(argv[i], "--debugger")) { options.debugger = 1; continue; }
+        if (argv[i][2] == 'p' && argv[i][3] == 'r' && argv[i][4] == 'o' && argv[i][5] == 'f'
+            && argv[i][6] == '=') { okrun_profile(argv[i] + 7); continue; }
         if (same(argv[i], "--trust") && i + 1 < argc && options.trusted_count < 16 && length(argv[i + 1]) == 64) {
             const char* k = argv[++i];
             for (int b = 0; b < 32; ++b) {
