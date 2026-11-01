@@ -205,7 +205,9 @@ jobs:
           grep -q "prof: not measured" <<<"$p" || { echo "::error::an unmeasured image was told it is measured"; exit 1; }
           grep -q "debug: prof_named_function" <<<"$p" || { echo "::error::the loader did not name the image's function"; exit 1; }
           rm -rf prof && mkdir prof
-          "$OKRUN" "--prof=calls,counters:$(pwd)/prof" "out/$a/prof.oke" > prof.out
+          # A directory relative to the working one: under Git Bash `$(pwd)` is
+          # an MSYS spelling (/d/a/...), which a Windows program does not open.
+          "$OKRUN" "--prof=calls,counters:prof" "out/$a/prof.oke" > prof.out
           grep -q "prof: measured" prof.out || { echo "::error::a measured image was told it is not"; exit 1; }
           report=$(ls prof/okprof-*.json | head -1)
           [ -n "$report" ] || { echo "::error::a measured image wrote no report"; exit 1; }
