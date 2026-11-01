@@ -87,6 +87,9 @@ extern "C" okld_u64 okld_interface_of(const char* n) {
         { "kal_env_", 3 }, { "kal_time_", 4 }, { "kal_random_", 5 }, { "kal_fs_", 6 },
         { "kal_process_", 7 }, { "kal_task_", 8 }, { "kal_exec_", 9 }, { "kal_terminal_", 10 },
         { "kal_net_", 11 }, { "kal_datagram_", 12 }, { "kal_space_", 13 }, { "kal_timeout_", 14 },
+        // openkal 0.18 and 0.20. openkal.map was missing here until 0.2, so an
+        // image that imported it required nothing for it in its note.
+        { "kal_map_", 15 }, { "kal_region_", 16 }, { "kal_prof_", 17 }, { "kal_debug_", 18 },
     };
     for (const auto& e : table) if (starts(n, e.prefix)) return 1ull << e.bit;
     return 0;   // kal_version, kal_interfaces: the specification's self-description
@@ -253,4 +256,55 @@ extern "C" int okld_set_requirements(void* bytes, okld_size n, okld_u64 interfac
     copy(d + 4, &minor, 4);
     copy(d + 8, &interfaces, 8);
     return 0;
+}
+
+// --- the symbols of an image's code and data (0.2) -----------------------------
+extern "C" okld_u64 okld_symbols(const void* bytes, okld_size size,
+                                 void (*each)(okld_u64, okld_u64, const char*, void*), void* ctx) {
+    using namespace okld;
+    view v;
+    char why[8];
+    if (!bytes || !each || !open(bytes, size, v, why, sizeof why)) return 0;
+    // The section table's symbol table, with its string table; else the
+    // dynamic one, whose names are the exports alone.
+    const elf::sym* syms = nullptr;
+    elf::u64 count = 0;
+    const char* strings = nullptr;
+    elf::u64 strings_size = 0;
+    if (v.eh->shoff && v.eh->shentsize == sizeof(elf::shdr)) {
+        const auto* sh = v.at<elf::shdr>(v.eh->shoff, v.eh->shnum);
+        for (unsigned i = 0; sh && i < v.eh->shnum && !syms; ++i) {
+            if (sh[i].type != elf::sht_symtab || sh[i].link >= v.eh->shnum) continue;
+            const auto& str = sh[sh[i].link];
+            const auto n = sh[i].size / sizeof(elf::sym);
+            const auto* t = v.at<elf::sym>(sh[i].offset, n);
+            const auto* s = v.at<char>(str.offset, str.size);
+            if (t && s) { syms = t; count = n; strings = s; strings_size = str.size; }
+        }
+    }
+    if (!syms) {
+        syms = v.symbols();
+        count = syms ? v.symbol_count() : 0;
+    }
+    okld_u64 given = 0;
+    for (elf::u64 k = 0; k < count; ++k) {
+        const auto& s = syms[k];
+        const unsigned type = s.info & 0xf;
+        if ((type != 1 /* STT_OBJECT */ && type != 2 /* STT_FUNC */) || s.value == 0
+            || s.shndx == elf::shn_undef || s.shndx == elf::shn_abs) continue;
+        const char* name = nullptr;
+        if (strings) {
+            if (s.name >= strings_size) continue;
+            name = strings + s.name;
+            bool ended = false;
+            for (elf::u64 i = s.name; i < strings_size; ++i) if (strings[i] == 0) { ended = true; break; }
+            if (!ended) continue;
+        } else {
+            name = v.string(s.name);
+        }
+        if (!name || !*name) continue;
+        each(s.value, s.size, name, ctx);
+        ++given;
+    }
+    return given;
 }

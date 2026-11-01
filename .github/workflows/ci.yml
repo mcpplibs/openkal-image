@@ -73,6 +73,7 @@ jobs:
             bash examples/build-image.sh "$arch" "out/$arch/libmathlib.okso" examples/bind/mathlib/image/mathlib.c
             # 8 MiB of the file's bytes, and a sleep: what stays resident once it is loaded.
             bash examples/build-image.sh "$arch" "out/$arch/resident.oke" examples/resident/app.c
+            bash examples/build-image.sh "$arch" "out/$arch/prof.oke" examples/prof/app.c
           done
           "$OKLD" keygen "$RUNNER_TEMP/seed" > out/key.hex
           for arch in x86_64 aarch64; do
@@ -177,6 +178,9 @@ jobs:
           echo "OKRUN=$okrun" >> "$GITHUB_ENV"
           okld=$(find "$PWD/target" -path '*bin*' \( -name okld -o -name okld.exe \) -type f | head -1)
           echo "OKLD_HOST=$okld" >> "$GITHUB_ENV"
+          okprof=$(find "$PWD/target" -path '*bin*' \( -name okprof -o -name okprof.exe \) -type f | head -1)
+          [ -n "$okprof" ] || { echo "::error::okprof did not build"; exit 1; }
+          echo "OKPROF=$okprof" >> "$GITHUB_ENV"
       - name: The same bytes
         run: |
           a='${{ matrix.arch }}'
@@ -193,6 +197,24 @@ jobs:
           w=$("$OKRUN" "out/$a/weak.oke" | tr -d '\r')
           echo "$w"
           grep -q "weak: openkal.net bound" <<<"$w" || { echo "::error::a weak import the implementation provides was not bound"; exit 1; }
+          # A MEASUREMENT AND THE NAME OF AN ADDRESS (0.2). Unmeasured, the
+          # image is told so and the loader names its function; measured, the
+          # report holds its calls, its counter and its phase.
+          p=$("$OKRUN" "out/$a/prof.oke" | tr -d '\r')
+          echo "$p"
+          grep -q "prof: not measured" <<<"$p" || { echo "::error::an unmeasured image was told it is measured"; exit 1; }
+          grep -q "debug: prof_named_function" <<<"$p" || { echo "::error::the loader did not name the image's function"; exit 1; }
+          rm -rf prof && mkdir prof
+          "$OKRUN" "--prof=calls,counters:$(pwd)/prof" "out/$a/prof.oke" > prof.out
+          grep -q "prof: measured" prof.out || { echo "::error::a measured image was told it is not"; exit 1; }
+          report=$(ls prof/okprof-*.json | head -1)
+          [ -n "$report" ] || { echo "::error::a measured image wrote no report"; exit 1; }
+          cat "$report"
+          grep -q '"example.widgets", "value": 42' "$report" || { echo "::error::the counter was not read"; exit 1; }
+          grep -q '"example.phase", "count": 2' "$report" || { echo "::error::the phase was not counted"; exit 1; }
+          grep -q '"kal_stream_write", "count": ' "$report" || { echo "::error::the calls were not counted"; exit 1; }
+          "$OKPROF" report prof | tee okprof.out
+          grep -q "openkal.stream" okprof.out || { echo "::error::okprof report did not group the calls by interface"; exit 1; }
       - name: The refusals
         run: |
           a='${{ matrix.arch }}'

@@ -167,8 +167,10 @@ const char* interface_name(int bit) {
         "openkal.abort", "openkal.stream", "openkal.memory", "openkal.env", "openkal.time",
         "openkal.random", "openkal.fs", "openkal.process", "openkal.task", "openkal.exec",
         "openkal.terminal", "openkal.net", "openkal.datagram", "openkal.space", "openkal.timeout",
+        "openkal.map", "openkal.region", "openkal.prof", "openkal.debug",
     };
-    return bit < 15 ? names[bit] : "an interface this runner does not know";
+    return bit < static_cast<int>(sizeof names / sizeof names[0]) ? names[bit]
+                                                                  : "an interface this runner does not know";
 }
 
 bool key_is_trusted(const okrun_options* options, const unsigned char key[32]) {
@@ -199,7 +201,9 @@ bool admit(const void* bytes, unsigned long long size, const char* name, const o
     }
     // WHAT THE IMAGE REQUIRES, AGAINST WHAT THIS IMPLEMENTATION PROVIDES: the
     // loader reports at load what a linker reports at link (SPEC 12.4).
-    unsigned long long provided = kal_interfaces();
+    // The loader's own interfaces are provided whatever the implementation
+    // provides (SPEC 12.3, 0.2).
+    unsigned long long provided = kal_interfaces() | KAL_IFACE_PROF | KAL_IFACE_DEBUG;
     unsigned long n = 0;
     if (!space_bindings(n) || n == 0) provided &= ~(1ull << 13);
     if (const unsigned long long missing = info.interfaces & ~provided) {
@@ -242,6 +246,12 @@ struct search {
     // read for an image another needs until the loader gives it back.
     file_bytes ran{};
     file_bytes needed[16] = {};
+    // Where each was read from, for a measurement and openkal.debug (0.2):
+    // the file run (empty for bytes a program carries), and each needed file's
+    // path and the name it was needed by.
+    char ran_path[1024] = {};
+    char needed_path[16][1024] = {};
+    char needed_name[16][256] = {};
 };
 
 // The file a run's image or okb was read from, given back once the image is
@@ -290,14 +300,162 @@ void in_parallel(void (*job)(okld_u64, void*), okld_u64 count, void* ctx, void*)
         if (running[i]) kal_task_join(started[i]);
 }
 
+// --- an okb's admission, remembered (0.2) ------------------------------------
+//
+// EVERY START OF AN OKB READ EVERY BYTE OF THE IMAGES IT RAN, to compare them
+// with the digests okb.json states: 0.04 to 0.14 s for a 146 MB okb on CI's
+// machines, and a language server that starts a worker per module it builds
+// started 176 of them. The comparison is remembered per user, per okb.json (its
+// SHA-256) and per member, with the identity, the length and the modification
+// time of the file it was made on: a start of the same file finds the record and
+// admits the member by its shape (stored, aligned) without reading it; a file
+// replaced or changed in place has another identity or time, and is compared
+// again. The record is in the user's own cache directory, which only the user
+// can write --- a party that could write a record could as well write the okb
+// it describes.
+struct memo_place { kal_dir dir{}; bool usable = false; char key[65] = {}; char stamp[96] = {}; };
+
+const char hex_digits[] = "0123456789abcdef";
+void to_hex(const unsigned char* b, int n, char* out) {
+    for (int i = 0; i < n; ++i) { out[2 * i] = hex_digits[b[i] >> 4]; out[2 * i + 1] = hex_digits[b[i] & 15]; }
+    out[2 * n] = 0;
+}
+char* put_number(char* o, unsigned long long v) {
+    char d[24]; int n = 0;
+    do { d[n++] = static_cast<char>('0' + v % 10); v /= 10; } while (v);
+    while (n) *o++ = d[--n];
+    return o;
+}
+
+// The user's cache directory, as this system places it, then `okrun/admitted'.
+bool memo_directory(kal_dir& out) {
+    char system[16];
+    const kal_intptr sn = kal_env_system(system, sizeof system);
+    const bool windows = sn == 7 && same_bytes(system, "windows", 7);
+    const bool macos = sn == 5 && same_bytes(system, "macos", 5);
+    char base[1024]; kal_intptr n = -1;
+    const char* tail = "";
+    if (windows) { n = kal_env_var("LOCALAPPDATA", 12, base, sizeof base - 64); }
+    else {
+        n = macos ? -1 : kal_env_var("XDG_CACHE_HOME", 14, base, sizeof base - 64);
+        if (n <= 0) { n = kal_env_var("HOME", 4, base, sizeof base - 64); tail = macos ? "/Library/Caches" : "/.cache"; }
+    }
+    if (n <= 0 || n >= static_cast<kal_intptr>(sizeof base - 64)) return false;
+    base[n] = 0;
+    char path[1200];
+    if (!join(path, sizeof path, base, "")) return false;
+    unsigned long at = length(path);
+    if (at && separator(path[at - 1])) --at;
+    for (const char* t = tail; *t && at + 1 < sizeof path; ++t) path[at++] = *t;
+    path[at] = 0;
+    kal_dir root{};
+    const char* rest = nullptr;
+    if (!locate(path, root, rest)) return false;
+    // Each component made in turn; one that exists is entered.
+    kal_dir d = root;
+    char part[1100]; unsigned long p = 0;
+    auto enter_part = [&]() -> bool {
+        if (p == 0) return true;
+        kal_dir next{};
+        kal_fs_mkdir(d, part, p);
+        if (kal_fs_open_dir(d, part, p, &next) != kal_ok) return false;
+        if (!(d.h == root.h)) kal_fs_close_dir(d);
+        d = next;
+        p = 0;
+        return true;
+    };
+    for (const char* c = rest; ; ++c) {
+        if (*c == 0 || separator(*c)) { if (!enter_part()) return false; if (*c == 0) break; continue; }
+        if (p + 1 < sizeof part) part[p++] = *c;
+    }
+    static const char* const below[] = { "okrun", "admitted" };
+    for (const char* c : below) {
+        p = 0;
+        while (c[p]) { part[p] = c[p]; ++p; }
+        if (!enter_part()) return false;
+    }
+    out = d;
+    return true;
+}
+
+void memo_open(search& s, memo_place& m) {
+    if (!s.ran_path[0] || !s.json) return;
+    kal_dir dir{}; const char* rest = nullptr;
+    if (!locate(s.ran_path, dir, rest)) return;
+    kal_node_info info{};
+    info.self_size = sizeof info;
+    if (kal_fs_info(dir, rest, length(rest), 0, KAL_INFO_IDENTITY | KAL_INFO_SIZE | KAL_INFO_MODIFIED, &info) != kal_ok
+        || !(info.present & KAL_INFO_IDENTITY) || !(info.present & KAL_INFO_MODIFIED))
+        return;
+    if (!memo_directory(m.dir)) return;
+    unsigned char digest[32];
+    okld_sha256(s.json, s.json_size, digest);
+    to_hex(digest, 32, m.key);
+    char* o = m.stamp;
+    o = put_number(o, info.identity[0]); *o++ = ' ';
+    o = put_number(o, info.identity[1]); *o++ = ' ';
+    o = put_number(o, info.size); *o++ = ' ';
+    o = put_number(o, info.modified_ns); *o++ = '\n'; *o = 0;
+    m.usable = true;
+}
+
+// The record's name: the manifest's digest and the member's.
+void memo_name(const memo_place& m, const char* member, char (&out)[160]) {
+    unsigned char d[32];
+    okld_sha256(member, length(member), d);
+    char h[65];
+    to_hex(d, 8, h);
+    unsigned long at = 0;
+    for (int i = 0; i < 64; ++i) out[at++] = m.key[i];
+    out[at++] = '-';
+    for (int i = 0; i < 16; ++i) out[at++] = h[i];
+    out[at] = 0;
+}
+
+bool memo_holds(const memo_place& m, const char* member) {
+    if (!m.usable) return false;
+    char name[160];
+    memo_name(m, member, name);
+    kal_file f{};
+    if (kal_fs_open(m.dir, name, length(name), KAL_OPEN_READ, &f) != kal_ok) return false;
+    char have[96] = {};
+    const kal_intptr n = kal_stream_read(kal_fs_stream(f), have, sizeof have - 1);
+    kal_fs_close_file(f);
+    const unsigned long want = length(m.stamp);
+    return n == static_cast<kal_intptr>(want) && same_bytes(have, m.stamp, want);
+}
+
+void memo_record(const memo_place& m, const char* member) {
+    if (!m.usable) return;
+    char name[160];
+    memo_name(m, member, name);
+    kal_file f{};
+    if (kal_fs_open(m.dir, name, length(name), KAL_OPEN_WRITE | KAL_OPEN_CREATE | KAL_OPEN_TRUNCATE, &f) != kal_ok) return;
+    kal_stream_write(kal_fs_stream(f), m.stamp, length(m.stamp));
+    kal_fs_close_file(f);
+}
+
+memo_place g_memo;
+bool g_memo_opened = false;
+
 // A member of the archive by name, admitted (stored, aligned, its stated content).
 const void* archive_member(search& s, const char* member, unsigned long long& size) {
     okld_zip_member m{};
     okld_why why{};
     if (okld_zip_find(s.archive, s.archive_size, member, &m, &why) != 0) return nullptr;
-    if (okld_okb_admit_chunked(s.archive, s.archive_size, &m, s.json, s.json_size, &in_parallel, nullptr, &why) != 0) {
-        copy_text(s.refusal, sizeof s.refusal, why.text);
-        return nullptr;
+    if (!g_memo_opened) { g_memo_opened = true; memo_open(s, g_memo); }
+    if (memo_holds(g_memo, member)) {
+        // Compared before, on this file as it is: its shape alone is asked.
+        if (okld_okb_admit(s.archive, s.archive_size, &m, nullptr, 0, &why) != 0) {
+            copy_text(s.refusal, sizeof s.refusal, why.text);
+            return nullptr;
+        }
+    } else {
+        if (okld_okb_admit_chunked(s.archive, s.archive_size, &m, s.json, s.json_size, &in_parallel, nullptr, &why) != 0) {
+            copy_text(s.refusal, sizeof s.refusal, why.text);
+            return nullptr;
+        }
+        memo_record(g_memo, member);
     }
     size = m.size;
     return s.archive + m.data;
@@ -370,7 +528,8 @@ const void* find_needed(const char* name, okld_size* size, void* ctx) {
         if (!bytes && s.refusal[0]) return nullptr;
     }
     file_bytes f;
-    if (!bytes && find_file(s, name, f)) { bytes = f.data; n = f.size; }
+    char found[1024] = {};
+    if (!bytes && find_file(s, name, f, found, sizeof found)) { bytes = f.data; n = f.size; }
     if (!bytes) return nullptr;
     char why[256];
     if (!admit(bytes, n, name, s.options, why, sizeof why)) {
@@ -381,9 +540,17 @@ const void* find_needed(const char* name, okld_size* size, void* ctx) {
     if (f.data) {
         // Held until the loader gives the bytes back (`release_needed').
         file_bytes* slot = nullptr;
-        for (auto& h : s.needed) if (!h.data) { slot = &h; break; }
+        unsigned k = 0;
+        for (auto& h : s.needed) { if (!h.data) { slot = &h; break; } ++k; }
         if (!slot) { release_file(f); copy_text(s.refusal, sizeof s.refusal, "more than sixteen files are needed at once"); return nullptr; }
         *slot = f;
+        copy_text(s.needed_path[k], sizeof s.needed_path[k], found);
+        copy_text(s.needed_name[k], sizeof s.needed_name[k], name);
+    } else if (s.archive && bytes >= s.archive && bytes < s.archive + s.archive_size) {
+        profile_loaded(name, bytes, n, s.ran_path[0] ? s.ran_path : nullptr,
+                       static_cast<kal_u64>(static_cast<const unsigned char*>(bytes) - s.archive));
+    } else {
+        profile_loaded(name, bytes, n, nullptr, 0);
     }
     *size = n;
     return bytes;
@@ -393,8 +560,16 @@ const void* find_needed(const char* name, okld_size* size, void* ctx) {
 // read with; the archive's and the group's bytes are not this search's.
 void release_needed(const void* bytes, okld_size, void* ctx) {
     auto& s = *static_cast<search*>(ctx);
-    for (auto& h : s.needed)
-        if (h.data && h.data == bytes) { release_file(h); return; }
+    for (unsigned k = 0; k < 16; ++k) {
+        auto& h = s.needed[k];
+        if (!h.data || h.data != bytes) continue;
+        // The image is loaded by now: a measurement reads its symbols while its
+        // bytes are at hand, and openkal.debug knows where to read them again.
+        profile_loaded(s.needed_name[k], h.data, h.size, s.needed_path[k], 0);
+        profile_settle();
+        release_file(h);
+        return;
+    }
 }
 
 void prepare_host(search& s) {
@@ -431,10 +606,21 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     }
     void* entry = okld_entry(m);
     if (!entry) { text(why, cap) << name << ": the image has no entry"; return -1; }
+    // Where the entry image's bytes can be read again (0.2): the file run, at
+    // the image's offset in it, or nowhere for bytes a program carries, which
+    // stay where they are.
+    {
+        const auto* b = static_cast<const unsigned char*>(bytes);
+        const bool fromRan = s.ran.data && b >= s.ran.data && b < s.ran.data + s.ran.size;
+        profile_loaded(name, bytes, size, fromRan && s.ran_path[0] ? s.ran_path : nullptr,
+                       fromRan ? static_cast<kal_u64>(b - s.ran.data) : 0);
+    }
+    profile_settle();
     release_ran(s);
     okld_initialise(m, &call_image, nullptr);
     const int status = reinterpret_cast<image_main>(entry)();
     okld_finalise(m, &call_image, nullptr);
+    profile_finish();
     kal_exit(status);
 }
 
@@ -517,6 +703,8 @@ search g_search;
 
 image_state& state() { return g_state; }
 
+bool locate_path(const char* path, kal_dir& dir, const char*& rest) { return locate(path, dir, rest); }
+
 }  // namespace okrun
 
 using namespace okrun;
@@ -564,6 +752,7 @@ extern "C" int okrun_run_file(const char* path, int argc, const char* const* arg
     file_bytes f;
     if (!read_all(path, f, why, cap)) return -1;
     g_search.ran = f;
+    copy_text(g_search.ran_path, sizeof g_search.ran_path, path);
     const int status = okrun_run_bytes(f.data, f.size, path, argc, argv, options, why, cap);
     release_ran(g_search);
     return status;

@@ -63,6 +63,17 @@ void okld_imports(const void* bytes, okld_size size, void (*each)(const char* na
 void okld_required_imports(const void* bytes, okld_size size, void (*each)(const char* name, void* ctx), void* ctx);
 void okld_exports(const void* bytes, okld_size size, void (*each)(const char* name, void* ctx), void* ctx);
 
+/* THE SYMBOLS OF AN IMAGE'S CODE AND DATA (0.2): every function and object
+ * symbol its symbol table states (the section table's `.symtab', else its
+ * dynamic symbols), as `value' (an address of the image, unrelocated: add the
+ * module's base), `size' and name, in the table's order. The table lies in the
+ * file and is never placed in memory by loading, which is why a program that
+ * names an address in itself asks the party holding the file (openkal.debug,
+ * SPEC 12.3). Returns how many were given. */
+okld_u64 okld_symbols(const void* bytes, okld_size size,
+                      void (*each)(okld_u64 value, okld_u64 symbol_size, const char* name, void* ctx),
+                      void* ctx);
+
 /* The `KAL_IFACE_*' positions a set of imported names requires: each `kal_'
  * name belongs to the interface its prefix names. */
 okld_u64 okld_interface_of(const char* kal_name);
