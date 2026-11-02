@@ -661,7 +661,7 @@ int record_cmd(std::vector<std::string> args) {
 int main(int argc, char** argv) {
     std::vector<std::string> args(argv + 1, argv + argc);
     if (args.empty()) {
-        std::println(std::cerr, "okprof record|report|diff ...  (see the head of tools/src/okprof.cpp)");
+        std::println(std::cerr, "usage: okprof record|report|diff ...  (see the head of tools/src/okprof.cpp)");
         return 2;
     }
     const std::string command = args.front();

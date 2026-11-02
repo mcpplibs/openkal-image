@@ -47,7 +47,7 @@ int main(int argc, char** argv) {
     }
     options.trusted = keys;
     if (i >= argc) {
-        say("usage: okrun [--require-signature] [--trust <hex>]... [--debugger] image|okb [arguments...]\n");
+        say("usage: okrun [--require-signature] [--trust <hex>]... [--debugger] [--prof=<what>[:dir]] image|okb [arguments...]\n");
         return 2;
     }
     char why[512];

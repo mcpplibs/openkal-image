@@ -101,23 +101,28 @@ jobs:
             echo "$(cd "$(dirname "$built")" && pwd)" >> "$GITHUB_PATH"
           fi
 
-      - name: okrun and okld, packed
+      - name: okrun, okld and okprof, packed
         working-directory: tools
         run: |
           tag='${{ github.event.inputs.tag }}'
           mkdir -p ../out
-          for tool in okrun okld; do
+          for tool in okrun okld okprof; do
             mcpp pack "$tool" ${{ matrix.pack }} --platform "openkal-platform@$PLATFORM_VERSION" \
                 --pkg-format zip -o "$tool-$tag-${{ matrix.id }}.zip"
             cp "target/dist/$tool-$tag-${{ matrix.id }}.zip" ../out/
           done
+          # The debugger's scripts (okgdb.py, oklldb.py) are the same on every
+          # system: one archive, from one row.
+          if [ '${{ matrix.id }}' = linux-x86_64 ]; then
+            (cd scripts && zip -q -X "../../out/openkal-debugger-scripts-$tag.zip" okgdb.py oklldb.py okgdb_common.py)
+          fi
           ls -l ../out
 
       - name: Each program runs here, from its package alone
         run: |
           python=python3; [ "$RUNNER_OS" = Windows ] && python=python
           tag='${{ github.event.inputs.tag }}'
-          for tool in okrun okld; do
+          for tool in okrun okld okprof; do
             root="$RUNNER_TEMP/x-$tool"
             # Unpacked as an unzip program does it, each file with the mode the
             # archive states (a program that lost its x bit fails here); the
