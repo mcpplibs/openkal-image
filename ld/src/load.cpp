@@ -303,65 +303,169 @@ void discard(okld_module* m) {
 }  // namespace
 
 namespace {
-// A WRITABLE SEGMENT OF AN IMAGE AT ITS BASE: the bytes the image stores for
-// that base (SPEC 12.4, type 3). Each 64 KiB of it that lies wholly within the
-// read-only-after-relocation range, and that no relocation naming a symbol
-// writes, is made the file's pages where the host can (kal_exec_map_part): it
-// is never written again, as the same data of a program linked for one address
-// is not. The rest is copied, and the size in memory beyond the file's is zero.
-void place_segment(okld_module* m, const view& v, const okld_host* host, const elf::phdr& p,
-                   const placement& at, elf::u64 relro_from, elf::u64 relro_to, const void* bytes) {
-    const placement::entry* e = nullptr;
-    for (elf::u32 i = 0; i < at.count; ++i) if (at.e[i].vaddr == p.vaddr) e = &at.e[i];
-    const auto* stored = static_cast<const unsigned char*>(bytes) + e->offset;
-    // The 64 KiB blocks a relocation naming a symbol writes, which are copied.
-    constexpr elf::u64 block = file_alignment;
-    const elf::u64 first = round_down(p.vaddr, block), blocks = (round_up(p.vaddr + p.filesz, block) - first) / block;
-    bool named[512] = {};
-    const bool mappable = host->map && blocks <= 512 && relro_to > relro_from;
-    if (mappable) {
-        auto mark = [&](elf::i64 tag, elf::i64 size_tag) {
-            const auto at_ = v.offset_of(v.dynamic(tag, ~0ull));
-            const auto n = v.dynamic(size_tag);
-            const auto* r = at_ == ~0ull ? nullptr : v.at<elf::rela>(at_, n / sizeof(elf::rela));
-            for (size k = 0; r && k < n / sizeof(elf::rela); ++k) {
-                if (!names_a_symbol(v, elf::r_type(r[k].info))) continue;
-                const elf::u64 o = r[k].offset;
-                if (o + 8 <= p.vaddr || o >= p.vaddr + p.filesz) continue;
-                named[(o > first ? o - first : 0) / block] = true;
-                const elf::u64 last = (o + 7 - first) / block;
-                if (last < blocks) named[last] = true;
+// WHERE AN IMAGE'S DATA COMES FROM WHEN IT IS AT A BASE: blocks of bytes that
+// are, at their addresses, what its writable segments hold --- the stored
+// segments of its placement (SPEC 12.4, type 3), in its own file, or a
+// loader's prepared copy (type 5), a file of its own --- and, for a snapshot,
+// the memory its initialisers obtained.
+struct source {
+    const unsigned char* bytes = nullptr;   // the file the blocks are in
+    size                 n = 0;
+    elf::u64             base = 0;
+    okld_prepared_block  block[64];
+    elf::u32             count = 0;
+    bool                 snapshot = false;
+    elf::u64             arena = 0, arena_size = 0;
+};
+
+// The 64 KiB blocks of a writable segment a relocation naming a symbol writes:
+// they are written on every start, so they are not a file's read-only pages.
+struct named_blocks {
+    elf::u64 first = 0;
+    bool     named[1024] = {};
+    elf::u64 count = 0;
+};
+
+constexpr elf::u64 block_size = 65536;
+
+void mark_named(const view& v, elf::u64 from, elf::u64 to, named_blocks& out) {
+    out.first = round_down(from, block_size);
+    out.count = (round_up(to, block_size) - out.first) / block_size;
+    if (out.count > 1024) out.count = 1024;
+    auto mark = [&](elf::i64 tag, elf::i64 size_tag) {
+        const auto at = v.offset_of(v.dynamic(tag, ~0ull));
+        const auto n = v.dynamic(size_tag);
+        const auto* r = at == ~0ull ? nullptr : v.at<elf::rela>(at, n / sizeof(elf::rela));
+        for (size k = 0; r && k < n / sizeof(elf::rela); ++k) {
+            if (!names_a_symbol(v, elf::r_type(r[k].info))) continue;
+            const elf::u64 o = r[k].offset;
+            if (o + 8 <= from || o >= to) continue;
+            const elf::u64 a = (o > out.first ? o - out.first : 0) / block_size;
+            const elf::u64 b = (o + 7 - out.first) / block_size;
+            if (a < out.count) out.named[a] = true;
+            if (b < out.count) out.named[b] = true;
+        }
+    };
+    mark(elf::dt_rela, elf::dt_relasz);
+    mark(elf::dt_jmprel, elf::dt_pltrelsz);
+}
+
+// A block's bytes into the region at `region', which begins at `at' (the
+// image's base, or a snapshot's arena) and holds `span' bytes: each 64 KiB of
+// it the block covers whole is the file's pages where the host can make it so
+// --- written privately, or read only where it lies in the read-only-after-
+// relocation range and no relocation naming a symbol writes it --- and the rest
+// is copied. A run of blocks alike is one request.
+void place_block(const okld_host* host, unsigned char* region, elf::u64 at, elf::u64 span,
+                 const source& src, const okld_prepared_block& b, elf::u64 relro_from, elf::u64 relro_to,
+                 const named_blocks& named) {
+    const elf::u64 lo = b.address - at, hi = lo + b.size;   // in the region
+    const elf::u64 g = host->granularity(host->ctx);
+    auto how_of = [&](elf::u64 chunk) -> int {
+        const elf::u64 image_lo = chunk + at - src.base;   // as an address of the image
+        const bool relro = image_lo >= relro_from && image_lo + block_size <= relro_to;
+        const elf::u64 k = (image_lo - named.first) / block_size;
+        const bool written = image_lo < named.first || k >= named.count || named.named[k];
+        return relro && !written ? 0 : OKLD_MAP_WRITE;
+    };
+    elf::u64 c = round_up(lo, block_size);
+    // The head before the first whole block, copied.
+    const elf::u64 head_end = c < hi ? c : hi;
+    if (head_end > lo) copy(region + lo, src.bytes + b.offset, head_end - lo);
+    while (c < hi) {
+        const elf::u64 room = hi - c;
+        // The tail of the block: whole to the granularity where it ends the
+        // span's writable part, copied otherwise.
+        elf::u64 len = room >= block_size ? block_size : 0;
+        if (len == 0) {
+            const elf::u64 rounded = round_up(room, g);
+            len = c + rounded <= span ? rounded : 0;
+        }
+        bool mapped = false;
+        if (len != 0 && host->map) {
+            const int how = how_of(c);
+            elf::u64 run = len;
+            while (run % block_size == 0 && c + run + block_size <= hi && how_of(c + run) == how) run += block_size;
+            if (c + run < hi && hi - (c + run) < block_size) {
+                const elf::u64 tail = round_up(hi - (c + run), g);
+                if (c + run + tail <= span && how_of(c + run) == how) run += tail;
             }
-        };
-        mark(elf::dt_rela, elf::dt_relasz);
-        mark(elf::dt_jmprel, elf::dt_pltrelsz);
-    }
-    for (elf::u64 b = 0; b < blocks; ++b) {
-        const elf::u64 lo = first + b * block, hi = lo + block;
-        const elf::u64 from = lo > p.vaddr ? lo : p.vaddr;
-        const elf::u64 to = hi < p.vaddr + p.filesz ? hi : p.vaddr + p.filesz;
-        // A run of blocks the file can hold, mapped together.
-        if (mappable && lo >= p.vaddr && hi <= p.vaddr + p.filesz && lo >= relro_from && hi <= relro_to && !named[b]) {
-            elf::u64 end = b + 1;
-            while (end < blocks) {
-                const elf::u64 elo = first + end * block, ehi = elo + block;
-                if (ehi > p.vaddr + p.filesz || ehi > relro_to || named[end]) break;
-                ++end;
-            }
-            const elf::u64 bytes_ = (end - b) * block;
-            if (host->map(m->base, lo, bytes_, bytes, e->offset + (lo - p.vaddr), 0, host->ctx) == 0) {
-                b = end - 1;
-                continue;
+            if (host->map(region, c, run, src.bytes, b.offset + (c - lo), how, host->ctx) == 0) {
+                mapped = true;
+                c += run;
             }
         }
-        copy(m->base + from, stored + (from - p.vaddr), to - from);
+        if (!mapped) {
+            const elf::u64 n = room < block_size ? room : block_size;
+            copy(region + c, src.bytes + b.offset + (c - lo), n);
+            c += n;
+        }
     }
-    fill(m->base + p.vaddr + p.filesz, 0, p.memsz - p.filesz);
+}
+
+// The pages an image states it touches when it starts (SPEC 12.4, type 4), as
+// a set of the 64 KiB blocks of its file.
+struct touched {
+    okld_u32 ranges[2 * OKLD_TOUCH_MAX];
+    okld_u32 count = 0;
+    bool holds(elf::u64 file_block) const {
+        for (okld_u32 i = 0; i < count; ++i)
+            if (file_block >= ranges[2 * i] && file_block < static_cast<elf::u64>(ranges[2 * i]) + ranges[2 * i + 1])
+                return true;
+        return false;
+    }
+};
+
+// A segment that is the file's pages: in runs that are read in now and runs
+// that are not, where the image states its touches and the host reads ahead.
+// Runs a few blocks apart are joined: a request costs more than the pages.
+int map_segment(const okld_host* host, unsigned char* region, elf::u64 lo, elf::u64 hi, const void* bytes,
+                elf::u64 from, int how, const touched* t) {
+    if (!t || t->count == 0) return host->map(region, lo, hi - lo, bytes, from, how, host->ctx);
+    const elf::u64 blocks = (hi - lo + block_size - 1) / block_size;
+    auto is_touched = [&](elf::u64 k) { return t->holds((from + k * block_size) / block_size); };
+    elf::u64 k = 0;
+    while (k < blocks) {
+        const bool on = is_touched(k);
+        elf::u64 e = k + 1;
+        for (;;) {
+            while (e < blocks && is_touched(e) == on) ++e;
+            // A gap of at most two blocks inside a run read in is read in too.
+            if (on && e < blocks) {
+                elf::u64 g2 = e;
+                while (g2 < blocks && !is_touched(g2) && g2 - e < 3) ++g2;
+                if (g2 < blocks && g2 - e < 3 && is_touched(g2)) { e = g2; continue; }
+            }
+            break;
+        }
+        const elf::u64 a = lo + k * block_size, z = e == blocks ? hi : lo + e * block_size;
+        if (host->map(region, a, z - a, bytes, from + k * block_size, how | (on ? OKLD_MAP_PREFETCH : 0), host->ctx) != 0)
+            return -1;
+        k = e;
+    }
+    return 0;
+}
+
+// The placement an image states, as a source in its own file.
+bool placement_source(const view& v, const placement& p, const void* bytes, source& out) {
+    out.bytes = static_cast<const unsigned char*>(bytes);
+    out.n = v.len;
+    out.base = p.base;
+    out.count = 0;
+    for (elf::u32 i = 0; i < p.count && out.count < 64; ++i)
+        out.block[out.count++] = okld_prepared_block{ p.base + p.e[i].vaddr, p.e[i].offset, p.e[i].size };
+    return true;
 }
 }  // namespace
 
-extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const okld_host* host,
-                         okld_module** out, okld_why* why) {
+namespace {
+int load_image(const void* bytes, okld_size n, const char* name, const okld_host* host, const source* prepared,
+               okld_module** out, okld_why* why);
+}  // namespace
+
+namespace {
+int load_image(const void* bytes, okld_size n, const char* name, const okld_host* host, const source* prepared,
+               okld_module** out, okld_why* why) {
     view v;
     if (!open(bytes, n, v, why ? why->text : nullptr, why ? sizeof why->text : 0)) return -1;
     if (char reason[256]; okld_check(bytes, n, nullptr, [](const char*, void*) { return 1; },
@@ -393,7 +497,7 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
         const void* nbytes = host->find_needed ? host->find_needed(need, &nsize, host->ctx) : nullptr;
         if (!nbytes) { say(why, "the image needs '", need, "', which is not found"); host->free(m, sizeof *m, host->ctx); return -1; }
         okld_module* nm = nullptr;
-        const int rc = okld_load(nbytes, nsize, need, host, &nm, why);
+        const int rc = load_image(nbytes, nsize, need, host, nullptr, &nm, why);
         if (host->release_bytes) host->release_bytes(nbytes, nsize, host->ctx);
         if (rc != 0) { host->free(m, sizeof *m, host->ctx); return rc; }
         m->needed[m->needed_count++] = nm;
@@ -406,19 +510,47 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
     m->span = round_up(m->span, g);
     // AT ITS BASE WHERE THE IMAGE STATES ONE AND THE HOST CAN PLACE IT THERE
     // (SPEC 12.3, openkal 0.23): its writable segments are then the bytes it
-    // stores for that base, and no relative relocation is applied. Otherwise
-    // anywhere, and every relocation is.
+    // stores for that base, and no relative relocation is applied. A prepared
+    // copy (type 5, 0.4) brings a base of its own and the data for it, and is
+    // refused rather than placed elsewhere: the bytes are for that base alone.
+    // Otherwise anywhere, and every relocation is.
     placement placed_at;
-    bool placed = false;
-    if (host->reserve_at && read_placement(v, placed_at) && placed_at.base % g == 0) {
+    source own;
+    const source* src = nullptr;
+    if (prepared) {
+        if (!host->reserve_at || prepared->base % g != 0) {
+            say(why, "the prepared copy's base cannot be reserved here");
+            host->free(m, sizeof *m, host->ctx);
+            return -1;
+        }
+        m->base = static_cast<unsigned char*>(host->reserve_at(reinterpret_cast<void*>(prepared->base), m->span, host->ctx));
+        if (!m->base) { say(why, "the prepared copy's base is not free"); host->free(m, sizeof *m, host->ctx); return -1; }
+        src = prepared;
+    } else if (host->reserve_at && read_placement(v, placed_at) && placed_at.base % g == 0) {
         m->base = static_cast<unsigned char*>(host->reserve_at(reinterpret_cast<void*>(placed_at.base), m->span, host->ctx));
-        placed = m->base != nullptr;
+        if (m->base) { placement_source(v, placed_at, bytes, own); src = &own; }
     }
+    const bool placed = src != nullptr;
     if (!placed) m->base = static_cast<unsigned char*>(host->reserve(m->span, host->ctx));
     if (!m->base) { say(why, "the address space for the image could not be reserved"); host->free(m, sizeof *m, host->ctx); return -1; }
-    // Each segment is its file bytes and then zeros to its size in memory. What
-    // lies between segments is no segment's and is not written: a page the image
-    // never touches is not made resident.
+    // A SNAPSHOT'S ARENA, after the span: the memory its initialisers obtained,
+    // at the addresses they were given.
+    unsigned char* arena = nullptr;
+    if (placed && src->snapshot && src->arena_size != 0) {
+        arena = static_cast<unsigned char*>(host->reserve_at(reinterpret_cast<void*>(src->arena), src->arena_size, host->ctx));
+        if (!arena) {
+            say(why, "the snapshot's arena is not free");
+            host->release(m->base, m->span, host->ctx);
+            host->free(m, sizeof *m, host->ctx);
+            return -1;
+        }
+    }
+    touched t;
+    if (host->prefetch) t.count = okld_touches(bytes, n, t.ranges, OKLD_TOUCH_MAX);
+    // Each segment is its file bytes and then zeros to its size in memory: the
+    // region is zero when it is returned (openkal 0.23), so the zeros are not
+    // written and a page of them is resident only once the program touches it.
+    // What lies between segments is no segment's and is not written either.
     //
     // A SEGMENT NOTHING WRITES IS THE FILE'S OWN PAGES where the host can make
     // it so (0.3, openkal 0.21): instructions and read-only data are the file's
@@ -443,10 +575,8 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
         if (p.flags & elf::pf_w) {
             if (w.count == 8) { say(why, "the image has more than eight writable segments"); host->release(m->base, m->span, host->ctx); host->free(m, sizeof *m, host->ctx); return -1; }
             w.from[w.count] = p.vaddr; w.to[w.count] = p.vaddr + p.memsz; ++w.count;
-            if (placed && p.filesz != 0) {
-                place_segment(m, v, host, p, placed_at, relro_from, relro_to, bytes);
-                continue;
-            }
+            // AT A BASE THE DATA IS THE SOURCE'S (below), not the file's bytes.
+            if (placed) continue;
         } else if (host->map && k < 32 && p.filesz == p.memsz && p.filesz != 0
                    && p.vaddr % file_alignment == p.offset % file_alignment) {
             const elf::u64 lo = round_down(p.vaddr, file_alignment), hi = round_up(p.vaddr + p.filesz, g);
@@ -458,13 +588,47 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
                 const elf::u64 qlo = round_down(q.vaddr, g), qhi = round_up(q.vaddr + q.memsz, g);
                 if (qlo < hi && lo < qhi) alone = false;
             }
-            if (alone && host->map(m->base, lo, hi - lo, bytes, from, (p.flags & elf::pf_x) != 0, host->ctx) == 0) {
+            if (alone && map_segment(host, m->base, lo, hi, bytes, from, (p.flags & elf::pf_x) ? OKLD_MAP_EXECUTE : 0,
+                                     host->prefetch ? &t : nullptr) == 0) {
                 mapped[k] = true;
                 continue;
             }
         }
         copy(m->base + p.vaddr, static_cast<const unsigned char*>(bytes) + p.offset, p.filesz);
-        fill(m->base + p.vaddr + p.filesz, 0, p.memsz - p.filesz);
+    }
+    // THE DATA OF AN IMAGE AT A BASE (0.4): each block of the source at its
+    // address, the file's pages written privately where the host can make them
+    // so (openkal 0.23, KAL_EXEC_MAP_WRITE) --- shared until the program writes
+    // a page, as a program of the environment's data is --- and copied where it
+    // cannot. A snapshot's blocks are the whole of the data and of the arena.
+    if (placed) {
+        // The blocks a relocation naming a symbol writes, over the writable
+        // segments together: those are not a file's read-only pages.
+        named_blocks named;
+        elf::u64 wlo = ~0ull, whi = 0;
+        for (elf::u32 k = 0; k < w.count; ++k) {
+            if (w.from[k] < wlo) wlo = w.from[k];
+            if (w.to[k] > whi) whi = w.to[k];
+        }
+        if (w.count) mark_named(v, wlo, whi, named);
+        for (elf::u32 i = 0; i < src->count; ++i) {
+            const okld_prepared_block& b = src->block[i];
+            const bool in_arena = arena && b.address >= src->arena && b.address - src->arena < src->arena_size;
+            if (in_arena) {
+                if (b.size > src->arena_size - (b.address - src->arena)) continue;
+                place_block(host, arena, src->arena, src->arena_size, *src, b, 0, 0, named);
+            } else {
+                const elf::u64 at = b.address - src->base;
+                if (b.address < src->base || !w.holds(at, b.size)) {
+                    say(why, "a block of the prepared data lies outside the image's writable segments");
+                    if (arena) host->release(arena, src->arena_size, host->ctx);
+                    host->release(m->base, m->span, host->ctx);
+                    host->free(m, sizeof *m, host->ctx);
+                    return -1;
+                }
+                place_block(host, m->base, src->base, m->span, *src, b, relro_from, relro_to, named);
+            }
+        }
     }
     m->entry = v.eh->entry;
     m->phnum = v.eh->phnum;
@@ -492,6 +656,18 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
 
     if (relocate(m, v, host, w, placed, why) != 0) { discard(m); return -1; }
 
+    // READ-ONLY AFTER RELOCATION (openkal 0.23): the addresses of functions and
+    // data relocation wrote, made read-only now, as a program of the
+    // environment's are by its loader --- for good where the image is never
+    // unloaded. The whole pages of the range: its first and last may share a
+    // page with data that is written.
+    if (host->seal && relro_to > relro_from) {
+        const elf::u64 lo = round_up(relro_from, g), hi = round_down(relro_to, g);
+        if (hi > lo) host->seal(m->base, lo, hi - lo, host->permanent, host->ctx);
+    }
+    // A SNAPSHOT'S INITIALISERS HAVE RUN: what they made is its data.
+    if (placed && src->snapshot) m->initialised = true;
+
     // Publish what executes and was copied; the rest stays writable. A segment
     // that is the file's pages is executable already, and its bytes reached
     // memory through the environment rather than through this loader's data
@@ -515,6 +691,35 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
     announce(m, static_cast<const unsigned char*>(bytes), n);
     *out = m;
     return 0;
+}
+}  // namespace
+
+extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const okld_host* host,
+                         okld_module** out, okld_why* why) {
+    return load_image(bytes, n, name, host, nullptr, out, why);
+}
+
+extern "C" int okld_load_prepared(const void* bytes, okld_size n, const char* name, const okld_host* host,
+                                  const void* prepared, okld_size prepared_size, okld_module** out, okld_why* why) {
+    okld_prepared_info info{};
+    source src;
+    if (okld_prepared(prepared, prepared_size, &info, src.block, 64) != 0 || info.count > 64) {
+        say(why, "not a prepared copy of an image (SPEC 12.4, type 5)");
+        return -1;
+    }
+    src.bytes = static_cast<const unsigned char*>(prepared);
+    src.n = prepared_size;
+    src.base = info.base;
+    src.count = info.count;
+    src.snapshot = (info.flags & OKLD_PREPARED_SNAPSHOT) != 0;
+    src.arena = info.arena;
+    src.arena_size = info.arena_size;
+    for (elf::u32 i = 0; i < src.count; ++i)
+        if (src.block[i].offset > prepared_size || src.block[i].size > prepared_size - src.block[i].offset) {
+            say(why, "a block of the prepared copy lies beyond its file");
+            return -1;
+        }
+    return load_image(bytes, n, name, host, &src, out, why);
 }
 
 namespace {

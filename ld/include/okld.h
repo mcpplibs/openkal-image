@@ -54,6 +54,15 @@ typedef void (*okld_report)(const char* sentence, void* ctx);
 int okld_check(const void* bytes, okld_size size, okld_name_test known_kal,
                okld_name_test exported_elsewhere, okld_report report, void* ctx);
 
+/* What an image's placement holds (SPEC 12.4, type 3): each stored segment is
+ * its file bytes with every relative relocation applied for the base, and no
+ * other word differs. A pass over every relative relocation and every stored
+ * byte, asked when an image is sealed (`okld check'); okld_check, which the
+ * loader asks on every load, holds only that the placement describes the image.
+ * Returns how many did not hold, calling `report' with each; 0 for an image
+ * that states no placement. Version 0.4. */
+int okld_check_placement(const void* bytes, okld_size size, okld_report report, void* ctx);
+
 /* The names an image imports, and the names it exports, one call each. */
 void okld_imports(const void* bytes, okld_size size, void (*each)(const char* name, void* ctx), void* ctx);
 /* The names an image requires: its imports less its weak ones. A weak import
@@ -246,14 +255,15 @@ struct okld_host {
     void      (*free)(void* p, okld_size bytes, void* ctx);
     /* Makes part of the region the bytes of the file the image was read from,
      * rather than a copy of them (kal_exec_map_part, openkal 0.21): `size'
-     * bytes from `bytes' + `from', at `offset' in the region, executed where
-     * `execute' is non-zero. `from' is a multiple of 65536 (KAL_MAP_ALIGNMENT)
-     * and `offset' and `size' of the granularity. Zero when it did; anything
-     * else, and the loader copies the bytes, as it does where this is null ---
-     * for bytes that are not a file of their own, or an implementation that
-     * does not report KAL_EXEC_PROP_FILE. Version 0.3. */
+     * bytes from `bytes' + `from', at `offset' in the region, as `how' says
+     * (OKLD_MAP_*; 0 read, as it was 0 in version 0.3, and 1 executed). `from'
+     * is a multiple of 65536 (KAL_MAP_ALIGNMENT) and `offset' and `size' of
+     * the granularity. Zero when it did; anything else, and the loader copies
+     * the bytes, as it does where this is null --- for bytes that are not a file
+     * of their own, or an implementation that does not report
+     * KAL_EXEC_PROP_FILE (or, for OKLD_MAP_WRITE, openkal 0.23). Version 0.3. */
     int       (*map)(void* region, okld_size offset, okld_size size, const void* bytes, okld_size from,
-                     int execute, void* ctx);
+                     int how, void* ctx);
     /* Non-zero: each image is announced to a debugger through the GDB JIT
      * interface (`__jit_debug_register_code'), with its addresses where it was
      * placed, so that gdb and lldb show its symbols and its source. */
@@ -266,7 +276,26 @@ struct okld_host {
      * relocations are not applied; null, or refused, and the image is reserved
      * anywhere and relocated. Version 0.4. */
     void*     (*reserve_at)(void* at, okld_size bytes, void* ctx);
+    /* Makes a part read-only once its relocations are applied
+     * (kal_exec_seal_part, openkal 0.23): the image's read-only-after-
+     * relocation range, for good where `forever' is non-zero. Null, and the
+     * range stays writable, as it was before version 0.4. */
+    int       (*seal)(void* region, okld_size offset, okld_size size, int forever, void* ctx);
+    /* Non-zero: the modules loaded with this host are never unloaded --- a
+     * runner's entry image and those it needs --- so their read-only-after-
+     * relocation range is sealed for good. Version 0.4. */
+    int       permanent;
+    /* Non-zero: the pages an image states it touches when it starts (SPEC
+     * 12.4, type 4) are read in as their part is mapped (OKLD_MAP_PREFETCH);
+     * zero spends no memory ahead of the program. A runner sets it by the
+     * program's resource preference. Version 0.4. */
+    int       prefetch;
 };
+
+/* What `okld_host::map' is asked. Version 0.4. */
+#define OKLD_MAP_EXECUTE  1   /* executed (KAL_EXEC_MAP_EXECUTE) */
+#define OKLD_MAP_PREFETCH 2   /* read in now (KAL_EXEC_MAP_PREFETCH) */
+#define OKLD_MAP_WRITE    4   /* written, privately (KAL_EXEC_MAP_WRITE) */
 
 struct okld_module;
 
@@ -296,6 +325,70 @@ okld_u64 okld_place(const void* image, okld_size size, okld_u64 base, void* out,
  * entries (0 when it states none). */
 int okld_placement(const void* image, okld_size size, okld_u64* base, okld_u32* count);
 
+/* --- the touch note (SPEC 12.4, type 4) ------------------------------------- */
+
+/* The ranges a touch note has room for: `okld note-source' lays down this many. */
+#define OKLD_TOUCH_MAX 512u
+
+/* Writes the touch note in place: `count' ranges, each two okld_u32 --- the
+ * first 65536-byte block of the range in the file and the number of blocks ---
+ * in the order the image first touches them when it starts. 0, or negative
+ * with `why' filled: no note to write into, more ranges than it holds, or a
+ * signed image (the signature is over these bytes: note, then sign). */
+int okld_touch(void* image, okld_size size, const okld_u32* ranges, okld_u32 count, struct okld_why* why);
+/* The ranges the touch note states, up to `cap' (pairs into `out'); returns
+ * how many it states. */
+okld_u32 okld_touches(const void* image, okld_size size, okld_u32* out, okld_u32 cap);
+
+/* --- a loader's prepared copy (SPEC 12.4, type 5) ---------------------------- */
+
+/* A FILE A LOADER WRITES FOR ITSELF AND DOES NOT DISTRIBUTE: a note of type 5
+ * at its start, then blocks of bytes at multiples of 65536 that are, at their
+ * addresses, what the image's writable segments hold --- computed for another
+ * base than the one the image was sealed with (a runner's base of this boot),
+ * or, with OKLD_PREPARED_SNAPSHOT, the image's state after its initialisers
+ * ran, with the memory they obtained (the arena, after the image's span). The
+ * loader takes the image's code from the image and these blocks for its data,
+ * mapping each block it can and copying the rest. */
+#define OKLD_PREPARED_SNAPSHOT 1u
+
+struct okld_prepared_block {
+    okld_u64 address;     /* where the bytes go */
+    okld_u64 offset;      /* where they are in the prepared file */
+    okld_u64 size;
+};
+
+struct okld_prepared_info {
+    okld_u32 version;     /* 1 */
+    okld_u32 flags;       /* OKLD_PREPARED_* */
+    okld_u64 base;        /* the image's base */
+    unsigned char digest[32];   /* the image, by the runner's name for it (SHA-256) */
+    okld_u32 count;       /* blocks */
+    okld_u32 reserved;
+    okld_u64 arena;       /* snapshot: the arena's address, after the image's span */
+    okld_u64 arena_size;  /* snapshot: the bytes of it the state reaches */
+    okld_u64 context;     /* snapshot: the word of the context the initialisers ran on */
+    okld_u64 start;       /* snapshot: the second phase's entry, relative to the base */
+    okld_u64 state;       /* snapshot: `__okm_snapshot_arena', relative to the base */
+};
+
+/* The image's writable segments computed for `base': their file bytes with
+ * every relative relocation applied. `digest' is the name the caller gives
+ * the image. Writes into `out' when `cap' holds it and returns the size, as
+ * okld_place does; 0 with `why' filled when the image has no writable segment
+ * or the base is not a multiple of 65536. */
+okld_u64 okld_prepare(const void* image, okld_size size, okld_u64 base, const unsigned char digest[32],
+                      void* out, okld_u64 cap, struct okld_why* why);
+/* Writes a prepared file of `info' and `blocks', each block's bytes from
+ * `source(address)' --- the whole of a snapshot's --- as okld_prepare does. */
+okld_u64 okld_prepare_blocks(const struct okld_prepared_info* info, const struct okld_prepared_block* blocks,
+                             const void* (*source)(okld_u64 address, okld_u64 size, void* ctx), void* ctx,
+                             void* out, okld_u64 cap);
+/* Reads a prepared file's note: 0, or negative when it is not one. Its blocks,
+ * up to `cap', into `blocks'. */
+int okld_prepared(const void* prepared, okld_size size, struct okld_prepared_info* info,
+                  struct okld_prepared_block* blocks, okld_u32 cap);
+
 /* Maps, relocates and publishes an image and, first, every image it needs.
  * Initialisers are not run: `okld_initialise' runs them, so that a caller can
  * do what it must between. The loader keeps no pointer into `bytes', nor into
@@ -303,6 +396,15 @@ int okld_placement(const void* image, okld_size size, okld_u64* base, okld_u32* 
  * (version 0.1.6; a runner releases the file it ran). */
 int  okld_load(const void* bytes, okld_size size, const char* name,
                const struct okld_host* host, struct okld_module** out, struct okld_why* why);
+/* okld_load, the image's data taken from a prepared copy (type 5) of it: at the
+ * copy's base, which the host reserves (reserve_at) or the load is refused;
+ * with a snapshot, its arena reserved after the span and its initialisers
+ * counted as run. The copy is a file of its own: `okld_host::map' is given its
+ * bytes. Its digest is not compared with the image's: the caller named both.
+ * Version 0.4. */
+int  okld_load_prepared(const void* bytes, okld_size size, const char* name, const struct okld_host* host,
+                        const void* prepared, okld_size prepared_size, struct okld_module** out,
+                        struct okld_why* why);
 /* Runs the initialisers of the module and of the modules it needs, needed ones
  * first, each once. `call' enters a function of the image in the image's
  * convention (the runner supplies it; see okrun). */

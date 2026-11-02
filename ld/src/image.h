@@ -78,6 +78,9 @@ struct placement {
     entry    e[8];
 };
 constexpr elf::u32 placement_note = 3;
+// THE TOUCH NOTE (type 4) and A LOADER'S PREPARED COPY (type 5), version 0.4.
+constexpr elf::u32 touch_note = 4;
+constexpr elf::u32 prepared_note = 5;
 constexpr size     placement_descriptor = 16 + 8 * sizeof(placement::entry);
 
 // The placement an image states, read and held to the image: one entry for

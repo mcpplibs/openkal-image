@@ -286,10 +286,10 @@ extern "C" int okld_check(const void* bytes, okld_size n, okld_name_test known_k
         }
     }
 
-    // A PLACEMENT, WHERE ONE IS STATED, DESCRIBES THE IMAGE AND HOLDS ITS
-    // SEGMENTS AS THE RELATIVE RELOCATIONS COMPUTE THEM FOR ITS BASE (SPEC
-    // 12.4, type 3): every word that differs from the file's is a relative
-    // relocation's, with the value it computes, and no other word differs.
+    // A PLACEMENT, WHERE ONE IS STATED, DESCRIBES THE IMAGE (SPEC 12.4, type
+    // 3): an entry for each writable segment with bytes in the file, its stored
+    // bytes within the file. What they hold is okld_check_placement's question,
+    // asked when an image is sealed and not on every load.
     elf::u32 psz = 0;
     if (const auto* pd = find_note(v, nullptr, placement_note, &psz); pd && psz >= 16) {
         elf::u32 count = 0;
@@ -297,8 +297,19 @@ extern "C" int okld_check(const void* bytes, okld_size n, okld_name_test known_k
         placement p;
         if (count != 0 && !read_placement(v, p))
             c.fail("its placement note does not describe its writable segments (SPEC 12.4)");
-        else if (count != 0) verify_placement(v, p, c);
     }
+
+    // A TOUCH NOTE, WHERE ONE IS STATED, HOLDS WHAT IT COUNTS; A PREPARED COPY
+    // IS NO IMAGE (SPEC 12.4, types 4 and 5): a loader writes one for itself,
+    // and refuses an image that carries one.
+    elf::u32 tsz = 0;
+    if (const auto* td = find_note(v, nullptr, touch_note, &tsz); td && tsz >= 8) {
+        elf::u32 count = 0;
+        copy(&count, td, 4);
+        if (8 + static_cast<elf::u64>(count) * 8 > tsz) c.fail("its touch note counts more ranges than it holds (SPEC 12.4)");
+    }
+    if (find_note(v, nullptr, prepared_note, nullptr))
+        c.fail("carries a loader's prepared copy (OPENKAL, type 5), which an image as distributed does not (SPEC 12.4)");
 
     elf::u32 sz = 0;
     const auto* req = find_note(v, nullptr, 1, &sz);
@@ -307,6 +318,16 @@ extern "C" int okld_check(const void* bytes, okld_size n, okld_name_test known_k
         elf::u32 major = 0; copy(&major, req, 4);
         if (major != OKLD_FORMAT_MAJOR) c.fail("its requirements note names another major version of the format (SPEC 12.4)");
     }
+    return c.failures;
+}
+
+extern "C" int okld_check_placement(const void* bytes, okld_size n, okld_report report, void* ctx) {
+    checker c{report, ctx};
+    view v;
+    char why[160];
+    if (!open(bytes, n, v, why, sizeof why)) { c.fail(why); return c.failures; }
+    placement p;
+    if (read_placement(v, p)) verify_placement(v, p, c);
     return c.failures;
 }
 

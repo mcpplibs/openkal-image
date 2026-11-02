@@ -9,10 +9,22 @@
 //                                  appended, and the placement note filled (SPEC 12.4,
 //                                  type 3): a loader that places the image there
 //                                  applies no relative relocation
+//   okld touch <image> <report or directory>...
+//                                  the pages the image's start executed first, as runs
+//                                  of its file's 64 KiB blocks in that order, written
+//                                  into its touch note (SPEC 12.4, type 4) from the
+//                                  reports `okrun --prof=touch' writes; a loader reads
+//                                  them in with their part. Before `okld sign'.
+//   okld debug-split <image> [-o <directory>]
+//                                  the image without what only a debugger reads (its
+//                                  section table and the sections it alone names), and
+//                                  the whole of it as <directory>/.build-id/xx/rest.debug,
+//                                  named by the image's build-id as debuginfod names one
+//                                  (okgdb.py and oklldb.py look there). Before `okld note'.
 //   okld sign <image> <seed-file>  the signature note filled (Ed25519); prints the key
 //   okld keygen <seed-file>        a new seed, written; prints its public key
 //   okld inspect <image>           what the image is
-//   okld note-source               the assembly that lays down the three notes, for the link
+//   okld note-source               the assembly that lays down the four notes, for the link
 //   okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>...
 //                                  an okb (docs/okb.md): the images, by architecture, and
 //                                  okb.json; with --sign, each image and okb.json signed
@@ -74,6 +86,8 @@ int check(const std::vector<unsigned char>& image) {
     int failures = okld_check(image.data(), image.size(),
         [](const char* n, void*) { return surface().contains(n) ? 1 : 0; },
         [](const char* n, void*) { return g_elsewhere.contains(n) ? 1 : 0; },
+        [](const char* s, void*) { std::println(std::cerr, "okld: {}", s); }, nullptr);
+    failures += okld_check_placement(image.data(), image.size(),
         [](const char* s, void*) { std::println(std::cerr, "okld: {}", s); }, nullptr);
     return failures == 0 ? 0 : 1;
 }
@@ -502,6 +516,12 @@ int bundle_check(const std::vector<std::string>& args) {
                     std::println(std::cerr, "okld: {}: {}: {}", *c.path, *c.name, sentence);
                     ++*c.failures;
                 }, &c);
+            okld_check_placement(image, m->size,
+                [](const char* sentence, void* p) {
+                    auto& c = *static_cast<ctx*>(p);
+                    std::println(std::cerr, "okld: {}: {}: {}", *c.path, *c.name, sentence);
+                    ++*c.failures;
+                }, &c);
         }
     }
     if (failures == 0) {
@@ -517,24 +537,168 @@ int bundle_check(const std::vector<std::string>& args) {
 
 }  // namespace
 
+// --- the touch note, from the runner's reports (0.4) ---------------------------------
+//
+// A report's touches: `"touches": [{ "image": <path>, "offset": <n> }, ...]',
+// read by a scan for the two keys, in order.
+std::vector<std::pair<std::string, std::uint64_t>> touches_of(const std::string& text) {
+    std::vector<std::pair<std::string, std::uint64_t>> out;
+    const auto start = text.find("\"touches\"");
+    if (start == std::string::npos) return out;
+    std::size_t at = start;
+    std::string image;
+    for (;;) {
+        const auto i = text.find("\"image\"", at), o = text.find("\"offset\"", at);
+        if (o == std::string::npos) break;
+        if (i != std::string::npos && i < o) {
+            const auto q = text.find('"', text.find(':', i) + 1);
+            const auto e = text.find('"', q + 1);
+            image = text.substr(q + 1, e - q - 1);
+        }
+        std::size_t k = text.find(':', o) + 1;
+        while (k < text.size() && text[k] == ' ') ++k;
+        std::uint64_t v = 0;
+        while (k < text.size() && text[k] >= '0' && text[k] <= '9') v = v * 10 + static_cast<std::uint64_t>(text[k++] - '0');
+        out.emplace_back(image, v);
+        at = k;
+        const auto close = text.find(']', start);
+        if (close != std::string::npos && at > close) break;
+    }
+    return out;
+}
+
+int touch(const std::vector<std::string>& args) {
+    if (args.size() < 3) { std::println(std::cerr, "okld touch <image> <report or directory>..."); return 2; }
+    auto image = read_file(args[1]);
+    if (!image) { std::println(std::cerr, "okld: {} cannot be read", args[1]); return 1; }
+    std::vector<std::filesystem::path> files;
+    for (std::size_t i = 2; i < args.size(); ++i) {
+        std::error_code ec;
+        if (std::filesystem::is_directory(args[i], ec)) {
+            for (auto const& e : std::filesystem::directory_iterator(args[i], ec))
+                if (e.path().filename().string().starts_with("okprof-") && e.path().extension() == ".json") files.push_back(e.path());
+        } else files.push_back(args[i]);
+    }
+    std::ranges::sort(files);
+    // The blocks in the order first touched, each once, over every report: a
+    // page another start touched first is placed where that start first did.
+    const auto stem = std::filesystem::path(args[1]).filename().string();
+    std::vector<okld_u32> order;
+    std::set<okld_u32> seen;
+    for (auto const& f : files) {
+        auto bytes = read_file(f.string());
+        if (!bytes) continue;
+        const std::string text(bytes->begin(), bytes->end());
+        auto t = touches_of(text);
+        bool named = false;
+        for (auto const& [img, off] : t) named = named || std::filesystem::path(img).filename().string() == stem;
+        for (auto const& [img, off] : t) {
+            if (named && std::filesystem::path(img).filename().string() != stem) continue;
+            const okld_u32 block = static_cast<okld_u32>(off / 65536);
+            if (seen.insert(block).second) order.push_back(block);
+        }
+    }
+    if (order.empty()) { std::println(std::cerr, "okld: the reports record no touch of {}", stem); return 1; }
+    // Runs of blocks that follow one another in the order.
+    std::vector<okld_u32> ranges;
+    for (std::size_t i = 0; i < order.size();) {
+        std::size_t j = i + 1;
+        while (j < order.size() && order[j] == order[j - 1] + 1) ++j;
+        ranges.push_back(order[i]);
+        ranges.push_back(static_cast<okld_u32>(j - i));
+        i = j;
+    }
+    const okld_u32 count = static_cast<okld_u32>(std::min<std::size_t>(ranges.size() / 2, okld::touch_max));
+    okld_why why{};
+    if (okld_touch(image->data(), image->size(), ranges.data(), count, &why) != 0) {
+        std::println(std::cerr, "okld: {}: {}", args[1], why.text);
+        return 1;
+    }
+    if (!write_file(args[1], *image)) return 1;
+    std::println("{}: {} block(s) in {} range(s){}", args[1], order.size(), count,
+                 count < ranges.size() / 2 ? " (the first of them; the note holds no more)" : "");
+    return 0;
+}
+
+// --- debug-split (0.4) -------------------------------------------------------------
+//
+// THE IMAGE A PROGRAM RUNS NEEDS ITS SEGMENTS, AND A DEBUGGER NEEDS EVERYTHING.
+// The whole file is kept, as the debug file a debugger reads by the image's
+// build-id; the image keeps what its segments hold and drops the section
+// table and what lies only beyond the segments --- the debug sections and the
+// symbol table, which a loader and the runner do not read (the runner names
+// addresses from the debug file where the image has no table of its own).
+int debug_split(const std::vector<std::string>& args) {
+    if (args.size() != 2 && !(args.size() == 4 && args[2] == "-o")) {
+        std::println(std::cerr, "okld debug-split <image> [-o <directory>]");
+        return 2;
+    }
+    auto image = read_file(args[1]);
+    if (!image || image->size() < 64) { std::println(std::cerr, "okld: {} cannot be read", args[1]); return 1; }
+    auto& b = *image;
+    std::uint64_t phoff = 0, shoff = 0; std::uint16_t phnum = 0;
+    std::memcpy(&phoff, b.data() + 32, 8); std::memcpy(&shoff, b.data() + 40, 8); std::memcpy(&phnum, b.data() + 56, 2);
+    if (shoff == 0) { std::println(std::cerr, "okld: {} has no section table: it is split already", args[1]); return 1; }
+    // The build-id: the GNU note of type 3 in a note segment.
+    std::string id;
+    std::uint64_t end = phoff + static_cast<std::uint64_t>(phnum) * 56;
+    for (unsigned i = 0; i < phnum; ++i) {
+        const auto* ph = b.data() + phoff + i * 56;
+        std::uint32_t type = 0; std::uint64_t off = 0, fs = 0;
+        std::memcpy(&type, ph, 4); std::memcpy(&off, ph + 8, 8); std::memcpy(&fs, ph + 32, 8);
+        if (off + fs > end) end = off + fs;
+        if (type != 4 /* PT_NOTE */) continue;
+        for (std::uint64_t at = off; at + 12 <= off + fs;) {
+            std::uint32_t namesz = 0, descsz = 0, ntype = 0;
+            std::memcpy(&namesz, b.data() + at, 4); std::memcpy(&descsz, b.data() + at + 4, 4); std::memcpy(&ntype, b.data() + at + 8, 4);
+            const std::uint64_t desc = at + 12 + ((namesz + 3u) & ~3u);
+            if (namesz == 4 && std::memcmp(b.data() + at + 12, "GNU", 4) == 0 && ntype == 3)
+                id = hex(b.data() + desc, descsz);
+            at = desc + ((descsz + 3u) & ~3u);
+        }
+    }
+    if (id.size() < 4) {
+        std::println(std::cerr, "okld: {} has no build-id (link with --build-id)", args[1]);
+        return 1;
+    }
+    const std::filesystem::path dir = args.size() == 4 ? std::filesystem::path(args[3]) : std::filesystem::path(args[1]).parent_path();
+    const auto debug = dir / ".build-id" / id.substr(0, 2) / (id.substr(2) + ".debug");
+    std::error_code ec;
+    std::filesystem::create_directories(debug.parent_path(), ec);
+    if (!write_file(debug.string(), b)) return 1;
+    // The image: its segments and what precedes them, no section table.
+    std::vector<unsigned char> kept(b.begin(), b.begin() + static_cast<std::ptrdiff_t>(std::min<std::uint64_t>(end, b.size())));
+    const std::uint64_t zero8 = 0; const std::uint16_t zero2 = 0;
+    std::memcpy(kept.data() + 40, &zero8, 8);   // e_shoff
+    std::memcpy(kept.data() + 60, &zero2, 2);   // e_shnum
+    std::memcpy(kept.data() + 62, &zero2, 2);   // e_shstrndx
+    if (!write_file(args[1], kept)) return 1;
+    std::println("{}: {} bytes kept; {} bytes for the debugger in {}", args[1], kept.size(), b.size(), debug.string());
+    return 0;
+}
+
 int main(int argc, char** argv) {
     const std::vector<std::string> args(argv + 1, argv + argc);
-    auto usage = [] { std::println(std::cerr, "usage: okld check|note|place|inspect <image> | sign <image> <seed-file> | keygen <seed-file> | note-source | bundle <out.okb> <image>... | bundle check <file.okb>"); return 2; };
+    auto usage = [] { std::println(std::cerr, "usage: okld check|note|place|inspect <image> | touch <image> <report>... | debug-split <image> | sign <image> <seed-file> | keygen <seed-file> | note-source | bundle <out.okb> <image>... | bundle check <file.okb>"); return 2; };
     if (args.empty()) return usage();
     const auto& verb = args[0];
 
     if (verb == "note-source") {
         std::print("{}",
-            "# The three notes of an ok image (SPEC 12.4): requirements, written by `okld note';\n"
-            "# a signature, written by `okld sign'; and a placement, written by `okld place'\n"
-            "# (format 1.1). The last two are all zero until then.\n"
+            "# The four notes of an ok image (SPEC 12.4): requirements, written by `okld note';\n"
+            "# a signature, written by `okld sign'; a placement, written by `okld place'\n"
+            "# (format 1.1); and the pages it touches when it starts, written by\n"
+            "# `okld touch' (format 1.1, room for 512 ranges). The last three are all zero\n"
+            "# until then.\n"
             "\t.section .note.openkal,\"a\",@note\n"
             "\t.p2align 2\n"
             "\t.long 8, 16, 1\n\t.asciz \"OPENKAL\"\n\t.long 1, 1\n\t.quad 0\n"
             "\t.p2align 2\n"
             "\t.long 8, 96, 2\n\t.asciz \"OPENKAL\"\n\t.fill 96, 1, 0\n"
             "\t.p2align 2\n"
-            "\t.long 8, 208, 3\n\t.asciz \"OPENKAL\"\n\t.fill 208, 1, 0\n");
+            "\t.long 8, 208, 3\n\t.asciz \"OPENKAL\"\n\t.fill 208, 1, 0\n"
+            "\t.p2align 2\n"
+            "\t.long 8, 4104, 4\n\t.asciz \"OPENKAL\"\n\t.fill 4104, 1, 0\n");
         return 0;
     }
     if (verb == "keygen" && args.size() == 2) {
@@ -548,6 +712,8 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (verb == "bundle" && args.size() >= 2 && args[1] == "check") return bundle_check(args);
+    if (verb == "touch") return touch(args);
+    if (verb == "debug-split") return debug_split(args);
     if (verb == "bundle") return bundle(args);
     if (args.size() < 2) return usage();
     auto image = read_file(args[1]);
@@ -616,6 +782,14 @@ int main(int argc, char** argv) {
             std::println("placement     {:#x}, {} writable segment(s) stored", base, count);
         else
             std::println("placement     none");
+        {
+            std::vector<okld_u32> ranges(2 * okld::touch_max);
+            const okld_u32 n = okld_touches(image->data(), image->size(), ranges.data(), okld::touch_max);
+            okld_u64 blocks = 0;
+            for (okld_u32 i = 0; i < n && i < okld::touch_max; ++i) blocks += ranges[2 * i + 1];
+            if (n) std::println("touches       {} block(s) in {} range(s)", blocks, n);
+            else std::println("touches       none");
+        }
         std::println("entry         {:#x}", info.entry);
         std::println("needs         {} image(s)", info.needed_count);
         std::vector<std::string> imports;

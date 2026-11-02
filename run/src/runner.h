@@ -28,6 +28,15 @@ const binding* bindings(unsigned long& count);
 inline constexpr unsigned long kProfiledNames = 256;
 bool profile_active();
 bool profile_calls();
+bool profile_samples();   // `samples': this runner takes them (0.4)
+bool profile_touches();   // `touch': this runner records them (0.4)
+// The phases of a start (0.4, `phases'): each mark is a moment of the start ---
+// admitted, loaded, relocated, initialised, main returned --- with the time and
+// the page faults so far.
+void profile_phase(const char* name);
+// What a measurement takes once the image is loaded and before it runs: the
+// samples begun, the touches of its executable parts begun (`okld_iterate').
+void profile_begin_run();
 void record_call(unsigned long index, kal_u64 ns);
 int  profile_counter(const char* name, kal_uintptr len, const volatile kal_u64* cell);
 void profile_mark(const char* name, kal_uintptr len, int begin);
