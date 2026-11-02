@@ -247,7 +247,7 @@ int main() {
         cut.resize(cut.size() - 30);
         check(okld_zip_each(cut.data(), cut.size(), nullptr, nullptr, &why) < 0, "a truncated archive is refused");
     }
-    const char* later = "{\"okb\": 2, \"architectures\": {\"x86_64\": {}}, \"entry\": \"a.oke\"}";
+    const char* later = "{\"okb\": 3, \"architectures\": {\"x86_64\": {}}, \"entry\": \"a.oke\"}";
     check(okld_okb_read_manifest(later, std::strlen(later), &man, &why) < 0
           && std::strstr(why.text, "later version"), "a later okb version is refused");
     check(okld_okb_read_manifest("{\"okb\": 1, \"entry\": ", 20, &man, &why) < 0, "a truncated manifest is refused");
