@@ -455,8 +455,10 @@ const void* archive_member(search& s, const char* member, unsigned long long& si
     if (okld_zip_find(s.archive, s.archive_size, member, &m, &why) != 0) return nullptr;
     if (!g_memo_opened) { g_memo_opened = true; memo_open(s, g_memo); }
     if (memo_holds(g_memo, member)) {
-        // Compared before, on this file as it is: its shape alone is asked.
-        if (okld_okb_admit(s.archive, s.archive_size, &m, nullptr, 0, &why) != 0) {
+        // Compared before, on this file as it is: its shape alone is asked,
+        // and no byte of it is read (0.3.1: the CRC-32 the archive states was
+        // computed here, a pass over the whole member on every start).
+        if (okld_okb_admit_layout(s.archive_size, &m, &why) != 0) {
             copy_text(s.refusal, sizeof s.refusal, why.text);
             return nullptr;
         }

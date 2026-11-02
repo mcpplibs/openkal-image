@@ -192,6 +192,11 @@ int okld_okb_is_image(const char* name, okld_size name_len);
  * filled. Nothing is copied. */
 int okld_okb_admit(const void* archive, okld_u64 size, const struct okld_zip_member* member,
                    const void* json, okld_size json_size, struct okld_why* why);
+/* A member admitted by its shape alone: stored, within the archive, and an
+ * image's bytes at a multiple of OKLD_OKB_ALIGNMENT. Its content is not read:
+ * for a member whose content was compared before, on the same file (okrun's
+ * remembered admission). 0, or negative with `why' filled. */
+int okld_okb_admit_layout(okld_u64 size, const struct okld_zip_member* member, struct okld_why* why);
 /* THE CHUNK DIGESTS okb.json may state for a member (`files.<member>.chunks',
  * docs/okb.md, version 0.1.8): the SHA-256 of each `size' bytes of it in
  * order, the last as long as what remains. 1 when they are stated, each given

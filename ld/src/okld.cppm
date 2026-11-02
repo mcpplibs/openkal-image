@@ -50,6 +50,7 @@ export using ::okld_okb_digest;
 export using ::okld_okb_each_file;
 export using ::okld_okb_is_image;
 export using ::okld_okb_admit;
+export using ::okld_okb_admit_layout;
 export using ::okld_okb_chunks;
 export using ::okld_okb_admit_chunked;
 export using ::okld_parallel;

@@ -349,6 +349,11 @@ extern "C" int okld_okb_admit(const void* archive, okld_u64 archive_size, const 
     return 0;
 }
 
+extern "C" int okld_okb_admit_layout(okld_u64 archive_size, const okld_zip_member* m, okld_why* why) {
+    char name[256];
+    return admit_layout(archive_size, m, name, why) ? 0 : -1;
+}
+
 extern "C" const char* okld_okb_arch_of(okld_u32 machine) {
     return machine == 62 ? "x86_64" : machine == 183 ? "aarch64" : nullptr;
 }
