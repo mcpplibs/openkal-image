@@ -4,10 +4,15 @@
 //                                  the convention (SPEC 12.2, 12.4); one line per violation
 //   okld note <image>              the interfaces the image's imports require, written into
 //                                  its requirements note
+//   okld place <image> [--base <hex>]
+//                                  each writable segment computed for one base and
+//                                  appended, and the placement note filled (SPEC 12.4,
+//                                  type 3): a loader that places the image there
+//                                  applies no relative relocation
 //   okld sign <image> <seed-file>  the signature note filled (Ed25519); prints the key
 //   okld keygen <seed-file>        a new seed, written; prints its public key
 //   okld inspect <image>           what the image is
-//   okld note-source               the assembly that lays down the two notes, for the link
+//   okld note-source               the assembly that lays down the three notes, for the link
 //   okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>...
 //                                  an okb (docs/okb.md): the images, by architecture, and
 //                                  okb.json; with --sign, each image and okb.json signed
@@ -514,19 +519,22 @@ int bundle_check(const std::vector<std::string>& args) {
 
 int main(int argc, char** argv) {
     const std::vector<std::string> args(argv + 1, argv + argc);
-    auto usage = [] { std::println(std::cerr, "usage: okld check|note|inspect <image> | sign <image> <seed-file> | keygen <seed-file> | note-source | bundle <out.okb> <image>... | bundle check <file.okb>"); return 2; };
+    auto usage = [] { std::println(std::cerr, "usage: okld check|note|place|inspect <image> | sign <image> <seed-file> | keygen <seed-file> | note-source | bundle <out.okb> <image>... | bundle check <file.okb>"); return 2; };
     if (args.empty()) return usage();
     const auto& verb = args[0];
 
     if (verb == "note-source") {
         std::print("{}",
-            "# The two notes of an ok image (SPEC 12.4): requirements, written by `okld note',\n"
-            "# and a signature, written by `okld sign' and all zero until then.\n"
+            "# The three notes of an ok image (SPEC 12.4): requirements, written by `okld note';\n"
+            "# a signature, written by `okld sign'; and a placement, written by `okld place'\n"
+            "# (format 1.1). The last two are all zero until then.\n"
             "\t.section .note.openkal,\"a\",@note\n"
             "\t.p2align 2\n"
-            "\t.long 8, 16, 1\n\t.asciz \"OPENKAL\"\n\t.long 1, 0\n\t.quad 0\n"
+            "\t.long 8, 16, 1\n\t.asciz \"OPENKAL\"\n\t.long 1, 1\n\t.quad 0\n"
             "\t.p2align 2\n"
-            "\t.long 8, 96, 2\n\t.asciz \"OPENKAL\"\n\t.fill 96, 1, 0\n");
+            "\t.long 8, 96, 2\n\t.asciz \"OPENKAL\"\n\t.fill 96, 1, 0\n"
+            "\t.p2align 2\n"
+            "\t.long 8, 208, 3\n\t.asciz \"OPENKAL\"\n\t.fill 208, 1, 0\n");
         return 0;
     }
     if (verb == "keygen" && args.size() == 2) {
@@ -564,6 +572,23 @@ int main(int argc, char** argv) {
         std::println("{}: requires {}", args[1], interfaces(bits));
         return 0;
     }
+    if (verb == "place" && (args.size() == 2 || (args.size() == 4 && args[2] == "--base"))) {
+        okld_u64 base = 0;
+        if (args.size() == 4) base = std::stoull(args[3], nullptr, 16);
+        okld_why why{};
+        const okld_u64 need = okld_place(image->data(), image->size(), base, nullptr, 0, &why);
+        if (need == 0) { std::println(std::cerr, "okld: {}: {}", args[1], why.text); return 1; }
+        std::vector<unsigned char> placed(need);
+        if (okld_place(image->data(), image->size(), base, placed.data(), need, &why) != need) {
+            std::println(std::cerr, "okld: {}: {}", args[1], why.text);
+            return 1;
+        }
+        if (!write_file(args[1], placed)) return 1;
+        okld_u64 at = 0; okld_u32 count = 0;
+        okld_placement(placed.data(), placed.size(), &at, &count);
+        std::println("{}: placed at {:#x}, {} writable segment(s) stored", args[1], at, count);
+        return 0;
+    }
     if (verb == "sign" && args.size() == 3) {
         auto seed = read_file(args[2]);
         if (!seed || seed->size() != 32) { std::println(std::cerr, "okld: {} is not a 32-byte seed", args[2]); return 1; }
@@ -586,6 +611,11 @@ int main(int argc, char** argv) {
         const int v = okld_verify(image->data(), image->size(), key);
         std::println("signature     {}", v == 1 ? "valid, by " + hex(key, 32) : v == 0 ? std::string("none") : std::string("PRESENT AND WRONG"));
         std::println("span          {:#x}", info.span);
+        okld_u64 base = 0; okld_u32 count = 0;
+        if (okld_placement(image->data(), image->size(), &base, &count) == 1)
+            std::println("placement     {:#x}, {} writable segment(s) stored", base, count);
+        else
+            std::println("placement     none");
         std::println("entry         {:#x}", info.entry);
         std::println("needs         {} image(s)", info.needed_count);
         std::vector<std::string> imports;

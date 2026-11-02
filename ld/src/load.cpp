@@ -202,7 +202,7 @@ void withdraw(okld_module* m) {
 // segment that is not writable may be the file's own pages (okld_host::map),
 // and a write the format does not allow (SPEC 12.2: no text relocation) is
 // refused rather than made wherever its offset points.
-int relocate(okld_module* m, const view& v, const okld_host* host, const writable& w, okld_why* why) {
+int relocate(okld_module* m, const view& v, const okld_host* host, const writable& w, bool placed, okld_why* why) {
     const elf::u64 b = reinterpret_cast<elf::u64>(m->base);
     const bool x86 = v.eh->machine == elf::em_x86_64;
     auto symbol_address = [&](elf::u32 index, bool& ok) -> elf::u64 {
@@ -231,6 +231,9 @@ int relocate(okld_module* m, const view& v, const okld_host* host, const writabl
             }
             auto* where = reinterpret_cast<elf::u64*>(m->base + r[k].offset);
             const elf::u32 t = elf::r_type(r[k].info);
+            // AT ITS BASE THE RELATIVE ONES ARE ALREADY IN THE BYTES (SPEC
+            // 12.3, openkal 0.23): what remains names a symbol.
+            if (placed && !names_a_symbol(v, t)) continue;
             bool ok = true;
             if (x86) {
                 switch (t) {
@@ -257,8 +260,9 @@ int relocate(okld_module* m, const view& v, const okld_host* host, const writabl
         return true;
     };
     if (!apply(elf::dt_rela, elf::dt_relasz) || !apply(elf::dt_jmprel, elf::dt_pltrelsz)) return -1;
-    // DT_RELR: packed relative relocations.
-    if (const elf::u64 at = v.dynamic(elf::dt_relr, ~0ull); at != ~0ull) {
+    // DT_RELR: packed relative relocations, already in the bytes of an image
+    // at its base.
+    if (const elf::u64 at = v.dynamic(elf::dt_relr, ~0ull); !placed && at != ~0ull) {
         const elf::u64 bytes = v.dynamic(elf::dt_relrsz);
         const auto* e = reinterpret_cast<const elf::u64*>(m->base + at);
         elf::u64 next = 0;   // the offset the first bit of a bitmap entry names
@@ -295,6 +299,64 @@ void discard(okld_module* m) {
     if (m->own_phdr) host->free(m->own_phdr, sizeof(elf::phdr) * m->phnum, host->ctx);
     host->release(m->base, m->span, host->ctx);
     host->free(m, sizeof *m, host->ctx);
+}
+}  // namespace
+
+namespace {
+// A WRITABLE SEGMENT OF AN IMAGE AT ITS BASE: the bytes the image stores for
+// that base (SPEC 12.4, type 3). Each 64 KiB of it that lies wholly within the
+// read-only-after-relocation range, and that no relocation naming a symbol
+// writes, is made the file's pages where the host can (kal_exec_map_part): it
+// is never written again, as the same data of a program linked for one address
+// is not. The rest is copied, and the size in memory beyond the file's is zero.
+void place_segment(okld_module* m, const view& v, const okld_host* host, const elf::phdr& p,
+                   const placement& at, elf::u64 relro_from, elf::u64 relro_to, const void* bytes) {
+    const placement::entry* e = nullptr;
+    for (elf::u32 i = 0; i < at.count; ++i) if (at.e[i].vaddr == p.vaddr) e = &at.e[i];
+    const auto* stored = static_cast<const unsigned char*>(bytes) + e->offset;
+    // The 64 KiB blocks a relocation naming a symbol writes, which are copied.
+    constexpr elf::u64 block = file_alignment;
+    const elf::u64 first = round_down(p.vaddr, block), blocks = (round_up(p.vaddr + p.filesz, block) - first) / block;
+    bool named[512] = {};
+    const bool mappable = host->map && blocks <= 512 && relro_to > relro_from;
+    if (mappable) {
+        auto mark = [&](elf::i64 tag, elf::i64 size_tag) {
+            const auto at_ = v.offset_of(v.dynamic(tag, ~0ull));
+            const auto n = v.dynamic(size_tag);
+            const auto* r = at_ == ~0ull ? nullptr : v.at<elf::rela>(at_, n / sizeof(elf::rela));
+            for (size k = 0; r && k < n / sizeof(elf::rela); ++k) {
+                if (!names_a_symbol(v, elf::r_type(r[k].info))) continue;
+                const elf::u64 o = r[k].offset;
+                if (o + 8 <= p.vaddr || o >= p.vaddr + p.filesz) continue;
+                named[(o > first ? o - first : 0) / block] = true;
+                const elf::u64 last = (o + 7 - first) / block;
+                if (last < blocks) named[last] = true;
+            }
+        };
+        mark(elf::dt_rela, elf::dt_relasz);
+        mark(elf::dt_jmprel, elf::dt_pltrelsz);
+    }
+    for (elf::u64 b = 0; b < blocks; ++b) {
+        const elf::u64 lo = first + b * block, hi = lo + block;
+        const elf::u64 from = lo > p.vaddr ? lo : p.vaddr;
+        const elf::u64 to = hi < p.vaddr + p.filesz ? hi : p.vaddr + p.filesz;
+        // A run of blocks the file can hold, mapped together.
+        if (mappable && lo >= p.vaddr && hi <= p.vaddr + p.filesz && lo >= relro_from && hi <= relro_to && !named[b]) {
+            elf::u64 end = b + 1;
+            while (end < blocks) {
+                const elf::u64 elo = first + end * block, ehi = elo + block;
+                if (ehi > p.vaddr + p.filesz || ehi > relro_to || named[end]) break;
+                ++end;
+            }
+            const elf::u64 bytes_ = (end - b) * block;
+            if (host->map(m->base, lo, bytes_, bytes, e->offset + (lo - p.vaddr), 0, host->ctx) == 0) {
+                b = end - 1;
+                continue;
+            }
+        }
+        copy(m->base + from, stored + (from - p.vaddr), to - from);
+    }
+    fill(m->base + p.vaddr + p.filesz, 0, p.memsz - p.filesz);
 }
 }  // namespace
 
@@ -342,7 +404,17 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
     for (unsigned k = 0; k < v.eh->phnum; ++k)
         if (v.ph[k].type == elf::pt_load && v.ph[k].vaddr + v.ph[k].memsz > m->span) m->span = v.ph[k].vaddr + v.ph[k].memsz;
     m->span = round_up(m->span, g);
-    m->base = static_cast<unsigned char*>(host->reserve(m->span, host->ctx));
+    // AT ITS BASE WHERE THE IMAGE STATES ONE AND THE HOST CAN PLACE IT THERE
+    // (SPEC 12.3, openkal 0.23): its writable segments are then the bytes it
+    // stores for that base, and no relative relocation is applied. Otherwise
+    // anywhere, and every relocation is.
+    placement placed_at;
+    bool placed = false;
+    if (host->reserve_at && read_placement(v, placed_at) && placed_at.base % g == 0) {
+        m->base = static_cast<unsigned char*>(host->reserve_at(reinterpret_cast<void*>(placed_at.base), m->span, host->ctx));
+        placed = m->base != nullptr;
+    }
+    if (!placed) m->base = static_cast<unsigned char*>(host->reserve(m->span, host->ctx));
     if (!m->base) { say(why, "the address space for the image could not be reserved"); host->free(m, sizeof *m, host->ctx); return -1; }
     // Each segment is its file bytes and then zeros to its size in memory. What
     // lies between segments is no segment's and is not written: a page the image
@@ -358,6 +430,11 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
     // shares; otherwise, and where the host declines, copied.
     bool mapped[32] = {};
     writable w;
+    // The read-only-after-relocation range, whose pages an image at its base
+    // need not write: those no symbol relocation writes are the file's.
+    elf::u64 relro_from = 0, relro_to = 0;
+    for (unsigned k = 0; k < v.eh->phnum; ++k)
+        if (v.ph[k].type == elf::pt_gnu_relro) { relro_from = v.ph[k].vaddr; relro_to = v.ph[k].vaddr + v.ph[k].memsz; }
     for (unsigned k = 0; k < v.eh->phnum; ++k) {
         const auto& p = v.ph[k];
         if (p.type != elf::pt_load) continue;
@@ -366,6 +443,10 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
         if (p.flags & elf::pf_w) {
             if (w.count == 8) { say(why, "the image has more than eight writable segments"); host->release(m->base, m->span, host->ctx); host->free(m, sizeof *m, host->ctx); return -1; }
             w.from[w.count] = p.vaddr; w.to[w.count] = p.vaddr + p.memsz; ++w.count;
+            if (placed && p.filesz != 0) {
+                place_segment(m, v, host, p, placed_at, relro_from, relro_to, bytes);
+                continue;
+            }
         } else if (host->map && k < 32 && p.filesz == p.memsz && p.filesz != 0
                    && p.vaddr % file_alignment == p.offset % file_alignment) {
             const elf::u64 lo = round_down(p.vaddr, file_alignment), hi = round_up(p.vaddr + p.filesz, g);
@@ -409,7 +490,7 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
     m->init_array = v.dynamic(elf::dt_init_array); m->init_arraysz = v.dynamic(elf::dt_init_arraysz);
     m->fini_array = v.dynamic(elf::dt_fini_array); m->fini_arraysz = v.dynamic(elf::dt_fini_arraysz);
 
-    if (relocate(m, v, host, w, why) != 0) { discard(m); return -1; }
+    if (relocate(m, v, host, w, placed, why) != 0) { discard(m); return -1; }
 
     // Publish what executes and was copied; the rest stays writable. A segment
     // that is the file's pages is executable already, and its bytes reached

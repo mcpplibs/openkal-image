@@ -3,8 +3,10 @@
 # (or, named *.okso, an image another needs) from freestanding C,
 # with the compiler and linker any LLVM carries (SPEC 12.2): no operating
 # system in the triple, position-independent, emulated thread-local storage,
-# x18 left alone on AArch64, segments aligned to 64 KiB, the two notes linked
-# in, and the requirements written by `okld note'.
+# x18 left alone on AArch64, segments aligned to 64 KiB, relative relocations
+# packed, the notes linked in, the requirements written by `okld note', and the
+# image placed at its base by `okld place' (openkal 0.23; PLACE=0 leaves the
+# placement note empty).
 set -euo pipefail
 arch="$1"; out="$2"; shift 2
 sources=(); link=()
@@ -27,9 +29,10 @@ for src in "${sources[@]}" "$work/note.S"; do
 done
 entry=(-e ok_main)
 case "$out" in *.okso) entry=(-soname "$(basename "$out")") ;; esac
-"$LLD" -shared -z max-page-size=65536 -z now -z noexecstack --hash-style=both "${entry[@]}" \
+"$LLD" -shared -z max-page-size=65536 -z now -z noexecstack -z pack-relative-relocs --hash-style=both "${entry[@]}" \
   -o "$out" "${objs[@]}" "${link[@]}"
 "$OKLD" note "$out"
+[ "${PLACE:-1}" = 0 ] || "$OKLD" place "$out"
 with=()
 for l in "${link[@]}"; do case "$l" in *.okso) with+=(--with "$l") ;; esac; done
 "$OKLD" check "$out" "${with[@]}"

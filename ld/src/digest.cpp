@@ -213,6 +213,24 @@ extern "C" void okld_sha256(const void* bytes, okld_size n, unsigned char out[32
     s.final(out);
 }
 
+namespace okld {
+void sha256_except(const void* bytes, size n, size hole, size hole_n, unsigned char out[32]) {
+    const auto* b = static_cast<const u8*>(bytes);
+    if (hole > n) hole = n;
+    if (hole_n > n - hole) hole_n = n - hole;
+    sha256 s;
+    s.update(b, hole);
+    static constexpr u8 zero[64] = {};
+    for (size left = hole_n; left > 0;) {
+        const size take = left < 64 ? left : 64;
+        s.update(zero, take);
+        left -= take;
+    }
+    s.update(b + hole + hole_n, n - hole - hole_n);
+    s.final(out);
+}
+}  // namespace okld
+
 extern "C" okld_u32 okld_crc32(okld_u32 crc, const void* bytes, okld_size n) {
     const auto* p = static_cast<const u8*>(bytes);
     u32 c = ~crc;

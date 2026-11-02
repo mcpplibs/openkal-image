@@ -17,7 +17,8 @@ name: CI
 #              an untrusted key. The okb runs through okrun and from memory; a
 #              program of the system calls an image's library through libokrun
 #              and through the binding openkal-bind generates, and the binding's
-#              refusals hold.
+#              refusals hold. An image at its base, anywhere and unplaced
+#              observes the same memory (0.4.0).
 
 on:
   push:
@@ -74,11 +75,31 @@ jobs:
             # 8 MiB of the file's bytes, and a sleep: what stays resident once it is loaded.
             bash examples/build-image.sh "$arch" "out/$arch/resident.oke" examples/resident/app.c
             bash examples/build-image.sh "$arch" "out/$arch/prof.oke" examples/prof/app.c
+            # AT ITS BASE (0.4.0): every image here is placed by build-image.sh;
+            # this one is also left unplaced, its placement note empty.
+            bash examples/build-image.sh "$arch" "out/$arch/placed.oke" examples/placed/app.c
+            PLACE=0 bash examples/build-image.sh "$arch" "out/$arch/unplaced.oke" examples/placed/app.c
+            "$OKLD" inspect "out/$arch/placed.oke" | awk '$1 == "placement" { sub(",", "", $2); print $2 }' > "out/$arch/placed.base"
+            grep -q '^0x' "out/$arch/placed.base" || { echo "::error::okld place stated no base"; exit 1; }
+            "$OKLD" inspect "out/$arch/unplaced.oke" | grep -q '^placement *none' \
+              || { echo "::error::an image left unplaced states a placement"; exit 1; }
+            # Placed again, the same base and the same bytes.
+            cp "out/$arch/placed.oke" again.oke
+            "$OKLD" place again.oke
+            cmp again.oke "out/$arch/placed.oke" || { echo "::error::placing a placed image changed it"; exit 1; }
+            # A changed byte of a stored segment is refused by the checker.
+            python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[-1]^=1; open(sys.argv[2],'wb').write(d)" \
+              "out/$arch/placed.oke" changed.oke
+            if "$OKLD" check changed.oke 2> changed-placement.txt; then echo "::error::a changed stored segment passed okld check"; exit 1; fi
+            grep -q "SPEC 12.4" changed-placement.txt
           done
           "$OKLD" keygen "$RUNNER_TEMP/seed" > out/key.hex
           for arch in x86_64 aarch64; do
             "$OKLD" sign "out/$arch/signed.oke" "$RUNNER_TEMP/seed"
             "$OKLD" inspect "out/$arch/signed.oke"
+            # The signature is over the stored segments too: placed, then signed.
+            if "$OKLD" place "out/$arch/signed.oke" 2> signed-place.txt; then echo "::error::a signed image was placed"; exit 1; fi
+            grep -q "place it, then sign it" signed-place.txt
             python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[len(d)//2]^=1; open(sys.argv[2],'wb').write(d)" \
               "out/$arch/signed.oke" "out/$arch/tampered.oke"
           done
@@ -217,6 +238,26 @@ jobs:
           grep -q '"kal_stream_write", "count": ' "$report" || { echo "::error::the calls were not counted"; exit 1; }
           "$OKPROF" report prof | tee okprof.out
           grep -q "openkal.stream" okprof.out || { echo "::error::okprof report did not group the calls by interface"; exit 1; }
+      - name: At its base (0.4.0)
+        run: |
+          # Placed where the implementation places memory where it is asked
+          # (KAL_EXEC_PROP_PLACE): at the base `okld place' chose, its relative
+          # relocations already in its bytes. Anywhere (OKRUN_PLACE=0), and an
+          # image left unplaced: relocated. What the image prints is the same.
+          a='${{ matrix.arch }}'
+          base=$(cat "out/$a/placed.base")
+          "$OKRUN" "out/$a/placed.oke" | tr -d '\r' > placed.txt
+          OKRUN_PLACE=0 "$OKRUN" "out/$a/placed.oke" | tr -d '\r' > anywhere.txt
+          "$OKRUN" "out/$a/unplaced.oke" | tr -d '\r' > unplaced.txt
+          cat placed.txt anywhere.txt unplaced.txt
+          grep -qx "base $base" placed.txt || { echo "::error::the image was not placed at the base it states ($base)"; exit 1; }
+          if grep -qx "base $base" anywhere.txt; then echo "::error::OKRUN_PLACE=0 placed the image at its base"; exit 1; fi
+          for f in placed anywhere unplaced; do grep -v '^base ' "$f.txt" > "$f.out"; done
+          cmp placed.out anywhere.out && cmp placed.out unplaced.out || { echo "::error::an image at its base observes other memory"; exit 1; }
+          for want in "the table holds its text" "the entry is the implementation's" "written two one"; do
+            grep -q "placed: $want" placed.out || { echo "::error::at its base: $want"; exit 1; }
+          done
+          echo "  ok  an image at its base, anywhere, and unplaced observes the same memory"
       - name: The refusals
         run: |
           a='${{ matrix.arch }}'
@@ -257,21 +298,23 @@ jobs:
       - name: What stays resident once an image is loaded (Linux)
         if: runner.os == 'Linux'
         run: |
-          # The runner releases the file it ran once the image is placed: while the
-          # image runs, the process maps neither the image nor the okb, and holds
-          # the 8 MiB segment once, as its copy.
+          # The runner releases its mapping of the file it ran once the image is
+          # placed: while the image runs, what the process maps of the image or
+          # the okb is the segments that are the file's pages (0.3.0), and it
+          # holds the 8 MiB segment once.
           for f in "out/${{ matrix.arch }}/resident.oke" out/resident.okb; do
             "$OKRUN" "$f" > resident.txt & pid=$!
             for i in $(seq 1 50); do grep -q loaded resident.txt 2>/dev/null && break; sleep 0.05; done
             grep -q "resident: loaded" resident.txt || { echo "::error::$f did not start"; exit 1; }
-            mapped=$(grep -c "resident\.ok" "/proc/$pid/maps" || true)
+            maps=$(grep "resident\.ok" "/proc/$pid/maps" || true)
             rss=$(awk '/^Rss:/ {print $2}' "/proc/$pid/smaps_rollup")
             wait "$pid"
-            echo "  $f: mapped $mapped times, $rss KiB resident"
-            [ "$mapped" = 0 ] || { echo "::error::the runner still maps $f while the image runs"; exit 1; }
+            echo "  $f: $rss KiB resident; of the file, mapped:"
+            echo "$maps"
+            if grep -q ' rw-p ' <<<"$maps"; then echo "::error::the runner still holds its mapping of $f while the image runs"; exit 1; fi
             [ "$rss" -lt 14336 ] || { echo "::error::$rss KiB resident for an 8 MiB image: the file's pages beside its copy"; exit 1; }
           done
-          echo "  ok  once loaded, the image is resident once: the file it came from is released"
+          echo "  ok  once loaded, the image is resident once: the runner's mapping of the file is released"
       - name: From memory, and a library from a program of this system (libokrun)
         run: |
           (cd examples/host && mcpp build --release)

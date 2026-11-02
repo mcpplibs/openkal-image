@@ -19,7 +19,7 @@ typedef __SIZE_TYPE__      okld_size;
 /* The version of clause 12 this library reads and writes. An image of a
  * higher major version is refused. */
 #define OKLD_FORMAT_MAJOR 1u
-#define OKLD_FORMAT_MINOR 0u
+#define OKLD_FORMAT_MINOR 1u
 
 /* What a reading reports about an image. Every field is filled by
  * `okld_read'; nothing is mapped. */
@@ -259,9 +259,42 @@ struct okld_host {
      * placed, so that gdb and lldb show its symbols and its source. */
     int       debugger;
     void* ctx;
+    /* Reserves the region at `at' (kal_exec_alloc_at, openkal 0.23): `at', or
+     * null with nothing reserved, as it is where the implementation does not
+     * report KAL_EXEC_PROP_PLACE. An image that states a placement (SPEC 12.4,
+     * type 3) is placed at its base when this answers, and its relative
+     * relocations are not applied; null, or refused, and the image is reserved
+     * anywhere and relocated. Version 0.4. */
+    void*     (*reserve_at)(void* at, okld_size bytes, void* ctx);
 };
 
 struct okld_module;
+
+/* --- placement (SPEC 12.4, type 3; openkal 0.23) ---------------------------- */
+
+/* The entries the placement note a sealed image carries has room for. */
+#define OKLD_PLACEMENT_MAX 8u
+
+/* The base `okld_place' chooses for an image when it is given none: from the
+ * SHA-256 of its bytes, a multiple of 4 GiB from 16 TiB to below 32 TiB, where
+ * no system places a program's own memory and each image of a process is likely
+ * to have its own. */
+okld_u64 okld_place_base(const void* image, okld_size size);
+
+/* The image placed at `base' (0: okld_place_base): its bytes, each writable
+ * loadable segment computed for `base' --- its file bytes with every relative
+ * relocation, RELA's and RELR's, applied --- appended at a file offset congruent
+ * to its address modulo 65536, and the placement note filled. A placement the
+ * image carries already is replaced. Writes into `out' when `cap' holds it and
+ * returns the size, as okld_zip_write does; 0 with `why' filled when the image
+ * has no placement note to fill, more writable segments than the note has room
+ * for, or a base that is not a multiple of 65536. */
+okld_u64 okld_place(const void* image, okld_size size, okld_u64 base, void* out, okld_u64 cap,
+                    struct okld_why* why);
+
+/* What the placement note of an image states: its base and the number of its
+ * entries (0 when it states none). */
+int okld_placement(const void* image, okld_size size, okld_u64* base, okld_u32* count);
 
 /* Maps, relocates and publishes an image and, first, every image it needs.
  * Initialisers are not run: `okld_initialise' runs them, so that a caller can

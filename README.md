@@ -8,7 +8,7 @@ architecture that has a runner.
 |---|---|---|
 | `openkal-ld` | `libokld` | The format's definition. A reader of bytes, a checker, a signer (Ed25519) and a loader. Freestanding: no C library, no exceptions. Its users are libokrun, `okld`, and a C library's `dlopen`. |
 | `openkal-run` | `libokrun` | The runner's core. It binds an image's names to this process's one openkal implementation, in the image's calling convention, then enters the image. |
-| `openkal-tools` | `okrun`, `okld`, `okprof` | `okrun [--require-signature] [--trust <key>] [--debugger] [--prof=<what>[:dir]] image\|okb args...` runs an image or an okb. `okld check \| note \| sign \| keygen \| inspect \| note-source \| bundle \| bundle check` works on images and okbs on a build machine. `okprof record \| report \| diff` measures what an image did across openkal. |
+| `openkal-tools` | `okrun`, `okld`, `okprof` | `okrun [--require-signature] [--trust <key>] [--debugger] [--prof=<what>[:dir]] image\|okb args...` runs an image or an okb. `okld check \| note \| place \| sign \| keygen \| inspect \| note-source \| bundle \| bundle check` works on images and okbs on a build machine. `okprof record \| report \| diff` measures what an image did across openkal. |
 | `openkal-bind` | `mcpp.mcpplibs.openkal_bind` | A build plugin. A library published as an image (`.okso`) and a C header is called from a program of Linux, macOS or Windows through a binding generated from the header ([docs/bind.md](docs/bind.md)). |
 
 `libokld` is the loader at run time and `okld` is the tool on the build machine. They share a
@@ -17,10 +17,11 @@ root and differ in role, as `ld.so` and `ld` do.
 ## An image
 
 ```sh
-okld note-source > note.S                      # the two notes (SPEC 12.4)
+okld note-source > note.S                      # the notes (SPEC 12.4)
 clang --target=x86_64-unknown-none-elf -ffreestanding -fPIC -femulated-tls -c app.c note.S
-ld.lld -shared -z max-page-size=65536 -z now -e ok_main -o app.oke app.o note.o
+ld.lld -shared -z max-page-size=65536 -z now -z pack-relative-relocs -e ok_main -o app.oke app.o note.o
 okld note app.oke                              # the interfaces its imports require
+okld place app.oke                             # its writable segments computed for its base
 okld check app.oke                             # the convention, every clause
 okrun app.oke arguments...
 ```
@@ -61,6 +62,18 @@ workers a language server starts for a cold build of 176 modules.
 starts a program with the system's null device at a position (`KAL_SPAWN_NULL_IN`, `_OUT`,
 `_ERR`), which the image's C library maps `/dev/null` onto; on Windows an image's workers started
 with their output discarded could not start before.
+
+**An image at its base** (0.4.0, openkal 0.23): `okld place` chooses a base from the image's
+bytes (a multiple of 4 GiB from 16 TiB), computes each writable segment for it, every relative
+relocation applied, and appends the result to the file with a placement note (SPEC 12.4, type 3).
+Where the implementation reports `KAL_EXEC_PROP_PLACE`, the loader reserves the image there
+(`kal_exec_alloc_at`), takes the stored segments and applies only the relocations that name a
+symbol; each 64 KiB of the read-only-after-relocation data that none of those writes is the
+file's pages. Where the base is taken, or the image states none, the loader places it anywhere
+and relocates it, as before; `OKRUN_PLACE=0` asks for that. The read-only data of all the
+processes of one image are then the same pages, as those of a program linked for one address
+are: a start of clangd as an image made 606 page faults at its base, 1 047 anywhere. An image
+is placed before it is signed, since the signature covers the stored bytes.
 
 ## A measurement of an image
 
@@ -115,8 +128,12 @@ its header and calls it, on openkal and on every other system alike ([docs/bind.
   and an unsigned manifest under `--require-signature` are refused.
 - A program of each system calls an image's library through `okrun_open_library`, and through
   the binding `openkal-bind` generates (including a callback); the boundary's refusals hold.
-- Once an image is loaded, the runner maps neither it nor the okb it came from, and holds its
-  segments once (Linux, from the process's mappings).
+- Once an image is loaded, the runner holds no mapping of its own of the image or the okb it
+  came from, only the segments that are the file's pages, and holds its segments once (Linux,
+  from the process's mappings).
+- An image at its base, the same image placed anywhere (`OKRUN_PLACE=0`) and the image left
+  unplaced observe the same memory; placing a placed image changes no byte; a changed byte of
+  a stored segment is refused by `okld check`, and a signed image is not placed.
 - An okb states its images' chunk digests, which okrun verifies on several contexts and
   `okld bundle check` beside the whole digest; a changed byte is refused by either.
 - libokld's SHA-256, CRC-32, ZIP reader and writer (with ZIP64) and manifest reader hold

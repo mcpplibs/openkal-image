@@ -51,6 +51,16 @@ bool same_bytes(const void* a, const void* b, unsigned long n) {
 void* reserve(okld_size n, void*) { return kal_exec_alloc(n); }
 int publish(void* region, okld_size off, okld_size n, void*) { return kal_exec_publish_part(region, off, n); }
 void release(void* region, okld_size n, void*) { kal_exec_free(region, n); }
+// At the base an image states (openkal 0.23, SPEC 12.3), where the
+// implementation places memory where it is asked. OKRUN_PLACE=0 places every
+// image anywhere and relocates it, as one that states no base is.
+void* reserve_at(void* at, okld_size n, void*) { return kal_exec_alloc_at(at, n); }
+bool placing() {
+    if (!(kal_exec_props() & KAL_EXEC_PROP_PLACE)) return false;
+    char v[4];
+    const kal_intptr n = kal_env_var("OKRUN_PLACE", 11, v, sizeof v);
+    return !(n == 1 && v[0] == '0');
+}
 okld_size granularity(void*) { return kal_exec_granularity(); }
 void* resolve(const char* name, void*) { return okrun_resolve(name); }
 void* allocate(okld_size n, void*) { return kal_alloc(n, 16); }
@@ -616,6 +626,7 @@ void prepare_host(search& s) {
     host.granularity = &granularity; host.resolve = &resolve;
     host.alloc = &allocate; host.free = &deallocate;
     host.find_needed = &find_needed; host.release_bytes = &release_needed;
+    host.reserve_at = placing() ? &reserve_at : nullptr;
     host.debugger = s.options ? s.options->debugger : 0;
     host.ctx = &s;
 }
