@@ -89,8 +89,15 @@ bool locate(const char* path, kal_dir& dir, const char*& rest) {
 }
 
 // A file's bytes: a region of the file (openkal.map), or a buffer it was read
-// into where the file cannot be mapped. `cap' is zero for a region.
-struct file_bytes { unsigned char* data = nullptr; unsigned long long size = 0, cap = 0; };
+// into where the file cannot be mapped. `cap' is zero for a region. A region's
+// file stays open while its bytes are held, so that the loader can make part of
+// an image the file's own pages (okld_host::map, 0.3).
+struct file_bytes {
+    unsigned char* data = nullptr;
+    unsigned long long size = 0, cap = 0;
+    kal_file file{};
+    bool open = false;
+};
 
 void release_bytes(unsigned char* data, unsigned long long size, unsigned long long cap) {
     if (!data) return;
@@ -100,6 +107,7 @@ void release_bytes(unsigned char* data, unsigned long long size, unsigned long l
 
 void release_file(file_bytes& f) {
     release_bytes(f.data, f.size, f.cap);
+    if (f.open) kal_fs_close_file(f.file);
     f = {};
 }
 
@@ -118,6 +126,8 @@ bool map_all(kal_file f, file_bytes& out) {
     out.data = static_cast<unsigned char*>(p);
     out.size = info.size;
     out.cap = 0;
+    out.file = f;
+    out.open = true;
     return true;
 }
 
@@ -128,7 +138,7 @@ bool read_all(const char* path, file_bytes& out, char* why, unsigned long long c
     unsigned long n = length(rest);
     kal_file f{};
     if (kal_fs_open(dir, rest, n, KAL_OPEN_READ, &f) != kal_ok) { text(why, cap) << path << " cannot be opened"; return false; }
-    if (map_all(f, out)) { kal_fs_close_file(f); return true; }
+    if (map_all(f, out)) return true;
     const kal_stream s = kal_fs_stream(f);
     for (;;) {
         if (out.size == out.cap) {
@@ -572,9 +582,35 @@ void release_needed(const void* bytes, okld_size, void* ctx) {
     }
 }
 
+// Part of an image is the file's own pages where the bytes are a file this
+// search holds (the file run, a library's, one read for an image another
+// needs) at a multiple of the alignment, and the implementation reports
+// KAL_EXEC_PROP_FILE (openkal 0.21). Bytes a program carries, a member of an
+// archive and an implementation without the position are copied.
+bool part_of(const file_bytes& f, const void* bytes, okld_size from, kal_u64& at) {
+    const auto* b = static_cast<const unsigned char*>(bytes);
+    if (!f.open || !f.data || b < f.data || b >= f.data + f.size) return false;
+    at = static_cast<kal_u64>(b - f.data) + from;
+    return at % KAL_MAP_ALIGNMENT == 0;
+}
+
+int map_part(void* region, okld_size offset, okld_size size, const void* bytes, okld_size from, int execute,
+             void* ctx) {
+    if (!(kal_exec_props() & KAL_EXEC_PROP_FILE)) return -1;
+    auto& s = *static_cast<search*>(ctx);
+    const kal_uintptr how = execute ? KAL_EXEC_MAP_EXECUTE : 0;
+    kal_u64 at = 0;
+    if (part_of(s.ran, bytes, from, at))
+        return kal_exec_map_part(region, offset, size, s.ran.file, at, how) == kal_ok ? 0 : -1;
+    for (const auto& f : s.needed)
+        if (part_of(f, bytes, from, at))
+            return kal_exec_map_part(region, offset, size, f.file, at, how) == kal_ok ? 0 : -1;
+    return -1;
+}
+
 void prepare_host(search& s) {
     okld_host& host = s.host;
-    host.reserve = &reserve; host.publish = &publish; host.release = &release;
+    host.reserve = &reserve; host.publish = &publish; host.release = &release; host.map = &map_part;
     host.granularity = &granularity; host.resolve = &resolve;
     host.alloc = &allocate; host.free = &deallocate;
     host.find_needed = &find_needed; host.release_bytes = &release_needed;
@@ -793,9 +829,7 @@ extern "C" int okrun_run_images(const okrun_image* images, unsigned long count, 
 
 struct okrun_library {
     okld_module*  module = nullptr;
-    search        s;
-    unsigned char* bytes = nullptr;   // a file's, mapped or read here
-    unsigned long long size = 0, cap = 0;
+    search        s;                  // `s.ran': the file it was read from, until it is loaded
 };
 
 namespace {
@@ -812,8 +846,7 @@ okrun_library* open_loaded(okrun_library* lib, const void* bytes, unsigned long 
     }
     okld_initialise(lib->module, &call_image, nullptr);
     // The file a library was read from is released once it is loaded.
-    release_bytes(lib->bytes, lib->size, lib->cap);
-    lib->bytes = nullptr; lib->size = 0; lib->cap = 0;
+    release_ran(lib->s);
     return lib;
 }
 
@@ -828,7 +861,7 @@ okrun_library* new_library(const okrun_options* options) {
 
 void free_library(okrun_library* lib) {
     if (!lib) return;
-    release_bytes(lib->bytes, lib->size, lib->cap);
+    release_ran(lib->s);
     kal_free(lib, sizeof(okrun_library), 16);
 }
 
@@ -857,9 +890,8 @@ extern "C" okrun_library* okrun_open_library(const char* path, const okrun_optio
         }
     }
     directory_of(found, lib->s.directory, sizeof lib->s.directory);
-    lib->bytes = f.data;
-    lib->size = f.size;
-    lib->cap = f.cap;
+    lib->s.ran = f;
+    copy_text(lib->s.ran_path, sizeof lib->s.ran_path, found);
     if (!open_loaded(lib, f.data, f.size, found, why, cap)) { free_library(lib); return nullptr; }
     return lib;
 }

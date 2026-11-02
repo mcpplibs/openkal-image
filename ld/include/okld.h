@@ -239,6 +239,16 @@ struct okld_host {
     /* Ordinary memory for the loader's own records (kal_alloc, kal_free). */
     void*     (*alloc)(okld_size bytes, void* ctx);
     void      (*free)(void* p, okld_size bytes, void* ctx);
+    /* Makes part of the region the bytes of the file the image was read from,
+     * rather than a copy of them (kal_exec_map_part, openkal 0.21): `size'
+     * bytes from `bytes' + `from', at `offset' in the region, executed where
+     * `execute' is non-zero. `from' is a multiple of 65536 (KAL_MAP_ALIGNMENT)
+     * and `offset' and `size' of the granularity. Zero when it did; anything
+     * else, and the loader copies the bytes, as it does where this is null ---
+     * for bytes that are not a file of their own, or an implementation that
+     * does not report KAL_EXEC_PROP_FILE. Version 0.3. */
+    int       (*map)(void* region, okld_size offset, okld_size size, const void* bytes, okld_size from,
+                     int execute, void* ctx);
     /* Non-zero: each image is announced to a debugger through the GDB JIT
      * interface (`__jit_debug_register_code'), with its addresses where it was
      * placed, so that gdb and lldb show its symbols and its source. */
