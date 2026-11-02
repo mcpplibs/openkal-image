@@ -120,7 +120,7 @@ beneath the program runs writes `okprof-<id>.json` when it ends:
 | `calls` | each name the image imports, bound through an entry that counts its calls and their time; an image that is not measured is bound as before and pays nothing |
 | `counters` | the counters and phases the program states through `openkal.prof` (`kal_prof_counter`, `kal_prof_mark`); `kal_prof_active` answers zero when nothing measures |
 | `perfmap` | `/tmp/perf-<pid>.map` on Linux, where `perf` reads the names of an image's addresses |
-| `phases` | the moments of a start --- admitted, loaded, initialised, main returned, exit --- with the time and the page faults to each (0.4) |
+| `phases` | the moments of a start --- admitted, loaded, its snapshot entered, initialised, main returned, exit --- with the time and the page faults to each (0.4) |
 | `samples[=hz]` | where the processor time goes, sampled by the implementation (`kal_prof_sample_*`, openkal 0.23) and named from the image's symbols; `okprof report --flame` folds the stacks, `--format=trace` lays phases and samples on one timeline for Perfetto (0.4) |
 | `touch` | the order of the first execution of each page of an image's instructions (0.4) |
 | `names` | `okprof record` grants the program its directories recorded (`KAL_DIR_RECORDED`, openkal 0.23); `okprof report --names` counts, by directory, the names read, written, listed and found absent (0.4) |

@@ -31,8 +31,8 @@ bool profile_calls();
 bool profile_samples();   // `samples': this runner takes them (0.4)
 bool profile_touches();   // `touch': this runner records them (0.4)
 // The phases of a start (0.4, `phases'): each mark is a moment of the start ---
-// admitted, loaded, relocated, initialised, main returned --- with the time and
-// the page faults so far.
+// admitted, loaded, a snapshot mapped, initialised, main returned --- with the
+// time and the page faults so far.
 void profile_phase(const char* name);
 // What a measurement takes once the image is loaded and before it runs: the
 // samples begun, the touches of its executable parts begun (`okld_iterate').

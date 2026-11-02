@@ -16,9 +16,9 @@
 //     counters   the counters and phases the program registers are kept
 //     perfmap    /tmp/perf-<pid>.map is written, where this system's profiler
 //                (perf) reads the names of an anonymous region's addresses
-//     phases     the moments of the start --- admitted, loaded, initialised,
-//                main returned --- with the time and the page faults to each
-//                (0.4)
+//     phases     the moments of the start --- admitted, loaded, its snapshot
+//                entered where it starts from one, initialised, main returned ---
+//                with the time and the page faults to each (0.4)
 //     samples[=hz]  where the program's processor time goes, sampled by the
 //                implementation (openkal 0.23) at hz a second (1000), each
 //                stack named from the images' symbol tables (0.4)

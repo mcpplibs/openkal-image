@@ -1393,7 +1393,9 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
         start_making(lp);
     profile_begin_run();
     if (from_snapshot) {
-        // THE SECOND PHASE: the C library takes what this start supplies.
+        // THE SECOND PHASE: the C library takes what this start supplies. A
+        // measurement of the start's phases names it.
+        profile_phase("snapshot");
         auto* base = static_cast<unsigned char*>(okld_base(m));
         *reinterpret_cast<snapshot_record*>(base + snap.state) = snapshot_record{ snap.arena, snap.arena_size, 2, 0, snap.context };
         call_image(base + snap.start, nullptr);
