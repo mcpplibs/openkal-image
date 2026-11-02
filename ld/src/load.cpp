@@ -406,7 +406,11 @@ void place_block(const okld_host* host, unsigned char* region, elf::u64 at, elf:
                 const elf::u64 tail = round_up(hi - (c + run), g);
                 if (c + run + tail <= span && how_of(c + run) == how) run += tail;
             }
-            if (host->map(region, c, run, src.bytes, b.offset + (c - lo), how, host->ctx) == 0) {
+            // The data an image at a base starts with, read in with it where
+            // the host reads everything ahead; a snapshot's is read as it is
+            // touched (a start touches little of what its initialisers made).
+            const int ahead = host->prefetch >= 2 && !src.snapshot ? OKLD_MAP_PREFETCH : 0;
+            if (host->map(region, c, run, src.bytes, b.offset + (c - lo), how | ahead, host->ctx) == 0) {
                 mapped = true;
                 c += run;
             }

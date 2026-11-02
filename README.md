@@ -101,6 +101,27 @@ resource preference or named values the initialisers read differ from those the 
 made under does not use it, and an initialiser that asks for anything else of the start is
 refused a snapshot. openkal-musl 0.27.0 takes part. `OKRUN_SNAPSHOT=0` runs the initialisers.
 
+## What a start spends
+
+A program's resource preference (openkal 0.23: balanced, performance, economy) decides what
+the runner spends ahead of it; balanced is taken as economy where memory available falls below
+15 % of the machine's, or the cache's volume below 1 GiB free (mcpp design 2026-11-03 part 4 §16):
+
+| point | performance | balanced | economy | single setting |
+| --- | --- | --- | --- | --- |
+| the data for this boot's base | kept in the cache | kept in the cache | computed for each start, written nowhere | `OKRUN_PLACE` |
+| a snapshot of the initialisers | made; the snapshots bound at 2 GiB | made; bound at 512 MiB, the least recently used removed | used where one exists, not made | `OKRUN_SNAPSHOT` |
+| what is read ahead | the touched pages and the data | the touched pages | nothing | `OKRUN_PREFETCH=0\|touch\|all` |
+
+A compressed okb (okb 2, `okld bundle --compress`; `mcpp pack --pkg-format okb --compress gzip`)
+is the economy form of a package: kept small on disk, its images expanded into the user's cache
+(`okrun/expanded`) when it first runs and mapped from there afterwards.
+
+`okrun cache` lists what the runner keeps for this machine, `okrun cache gc` removes what was
+prepared for another boot, and `okrun cache gc --all` everything, remembered admissions,
+digests and expanded images included. A measurement's report states what the runner chose at
+each point (`runner`: the placement's data, the snapshot, what was read ahead, an expansion).
+
 ## A measurement of an image
 
 The runner binds every name an image calls across openkal and read the image's file, so it
@@ -178,6 +199,9 @@ its header and calls it, on openkal and on every other system alike ([docs/bind.
 - A snapshot is made once, a start uses it, a start whose named value differs and
   `OKRUN_SNAPSHOT=0` do not, and an image whose initialiser asks for the time is refused one,
   the marker naming the call.
+- A compressed okb is checked by `okld bundle check`, runs on all four machines, expanding its
+  image once into the cache, and a changed byte of it is refused; an economy start writes
+  nothing to the runner's cache; `okrun cache` lists and removes what it keeps.
 - An okb states its images' chunk digests, which okrun verifies on several contexts and
   `okld bundle check` beside the whole digest; a changed byte is refused by either.
 - libokld's SHA-256, CRC-32, ZIP reader and writer (with ZIP64) and manifest reader hold

@@ -121,7 +121,7 @@ okld_u32 okld_crc32(okld_u32 crc, const void* bytes, okld_size size);
 
 /* --- ZIP archives and okb v1 (docs/okb.md) -------------------------------- */
 
-#define OKLD_OKB_VERSION   1u
+#define OKLD_OKB_VERSION   2u   /* 2: an image member may be compressed (0.4) */
 #define OKLD_OKB_ALIGNMENT 65536u
 
 /* A member of a ZIP archive that lies in memory. `name' points into the
@@ -150,12 +150,17 @@ int okld_zip_find(const void* archive, okld_u64 size, const char* name,
                   struct okld_zip_member* out, struct okld_why* why);
 
 /* A member to write: stored; when `align' is not zero its bytes begin at a
- * multiple of the archive's alignment. */
+ * multiple of the archive's alignment. With `method' 8 (version 0.4), `bytes'
+ * are a DEFLATE stream of `size' bytes that expands to `original' bytes whose
+ * CRC-32 is `crc32'. */
 struct okld_zip_input {
     const char* name;
     const void* bytes;
     okld_u64    size;
     int         align;
+    okld_u32    method;
+    okld_u64    original;
+    okld_u32    crc32;
 };
 /* Writes a ZIP archive of the members, in order, into `out' and returns its
  * size; when `out' is null or `cap' is smaller, writes nothing and returns
@@ -201,6 +206,17 @@ int okld_okb_is_image(const char* name, okld_size name_len);
  * filled. Nothing is copied. */
 int okld_okb_admit(const void* archive, okld_u64 size, const struct okld_zip_member* member,
                    const void* json, okld_size json_size, struct okld_why* why);
+/* A MEMBER STORED COMPRESSED (DEFLATE, method 8; docs/okb.md, version 0.4),
+ * expanded into `out' (at least its original size) and held to the content
+ * `json' states (its SHA-256), or without a manifest to its CRC-32. A runner
+ * expands it once, into a file of its own, and maps that. 0, or negative with
+ * `why' filled. */
+int okld_okb_expand(const void* archive, okld_u64 size, const struct okld_zip_member* member,
+                    const void* json, okld_size json_size, void* out, okld_u64 cap, struct okld_why* why);
+/* DEFLATE, read (RFC 1951): what `in' expands to, into `out', at most `cap'
+ * bytes; `*ok' is 1 when the stream was whole and well formed. Returns the
+ * bytes written. Version 0.4. */
+okld_u64 okld_inflate(const void* in, okld_u64 in_size, void* out, okld_u64 cap, int* ok);
 /* A member admitted by its shape alone: stored, within the archive, and an
  * image's bytes at a multiple of OKLD_OKB_ALIGNMENT. Its content is not read:
  * for a member whose content was compared before, on the same file (okrun's
@@ -285,10 +301,11 @@ struct okld_host {
      * runner's entry image and those it needs --- so their read-only-after-
      * relocation range is sealed for good. Version 0.4. */
     int       permanent;
-    /* Non-zero: the pages an image states it touches when it starts (SPEC
-     * 12.4, type 4) are read in as their part is mapped (OKLD_MAP_PREFETCH);
-     * zero spends no memory ahead of the program. A runner sets it by the
-     * program's resource preference. Version 0.4. */
+    /* What is read in as its part is mapped (OKLD_MAP_PREFETCH): 1, the pages
+     * an image states it touches when it starts (SPEC 12.4, type 4); 2, those
+     * and the data of an image at a base (its stored segments or a prepared
+     * copy's, not a snapshot's); 0 spends no memory ahead of the program. A
+     * runner sets it by the program's resource preference. Version 0.4. */
     int       prefetch;
 };
 

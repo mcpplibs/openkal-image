@@ -28,11 +28,15 @@
 //   okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>...
 //                                  an okb (docs/okb.md): the images, by architecture, and
 //                                  okb.json; with --sign, each image and okb.json signed
+//                                  (--compress: each image stored compressed, DEFLATE, which a
+//                                  runner expands once into its cache: an okb kept small, 0.4)
 //   okld bundle check <file.okb> [--require-signature] [--trust <hex>]...
-//                                  every member stored, every image aligned, every digest,
-//                                  signature and image of the okb; one line per violation
+//                                  every member stored or an image compressed, every stored
+//                                  image aligned, every digest, signature and image of the
+//                                  okb; one line per violation
 //
 // It does not link: an image is linked by an ordinary linker (`ld.lld -shared').
+#include <zlib.h>
 import std;
 import openkal.ld;
 import openkal.run;
@@ -216,11 +220,12 @@ std::string base_name(const std::string& path) {
 int bundle(const std::vector<std::string>& args) {
     // okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>...
     // okld bundle <out.okb> --package <staged-tree> [--sign <seed-file>]
-    const char* usage = "usage: okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>...\n"
-                        "       okld bundle <out.okb> --package <staged-tree> [--sign <seed-file>]";
+    const char* usage = "usage: okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] [--compress] <image>...\n"
+                        "       okld bundle <out.okb> --package <staged-tree> [--sign <seed-file>] [--compress]";
     if (args.size() < 3) { std::println(std::cerr, "{}", usage); return 2; }
     const std::string out = args[1];
     std::string name, version, entry, seed_file, package;
+    bool compress = false;
     std::vector<std::string> paths;
     std::map<std::string, std::string> expected_arch;    // path -> the architecture its place names
     std::map<std::string, std::string> stated_digest;    // path -> the sha256 mcpp-package.json states
@@ -237,6 +242,7 @@ int bundle(const std::vector<std::string>& args) {
         else if (a == "--entry") { if (!value(entry)) return 2; }
         else if (a == "--sign") { if (!value(seed_file)) return 2; }
         else if (a == "--package") { if (!value(package)) return 2; }
+        else if (a == "--compress") compress = true;
         else if (a.starts_with("--")) { std::println(std::cerr, "okld: unknown option {}", a); return 2; }
         else paths.push_back(a);
     }
@@ -332,7 +338,11 @@ int bundle(const std::vector<std::string>& args) {
     if (name.empty()) name = entry.substr(0, entry.rfind('.'));
 
     // okb.json: keys in a fixed order, files by member name.
-    std::string json = std::format("{{\n  \"okb\": {},\n  \"name\": {},\n", okld::okb_version, json_string(name));
+    // Version 1 where every member is stored, which every reader reads; 2 where
+    // an image is compressed, which a reader of 1 refuses by its version rather
+    // than by a member it cannot admit.
+    const unsigned okb = compress ? 2u : 1u;
+    std::string json = std::format("{{\n  \"okb\": {},\n  \"name\": {},\n", okb, json_string(name));
     if (!version.empty()) json += std::format("  \"version\": {},\n", json_string(version));
     json += std::format("  \"entry\": {},\n  \"architectures\": {{\n", json_string(entry));
     {
@@ -350,7 +360,7 @@ int bundle(const std::vector<std::string>& args) {
             // AN IMAGE'S CHUNKS TOO (docs/okb.md, 0.1.8): a runner verifies them
             // in parallel, where one SHA-256 of the whole cannot be shared out.
             std::string chunks;
-            if (okld_okb_is_image(k.data(), k.size())) {
+            if (okld_okb_is_image(k.data(), k.size()) && !compress) {
                 chunks = std::format(",\n      \"chunks\": {{ \"size\": {}, \"sha256\": [", okld::okb_chunk);
                 for (std::size_t at = 0; at < m.bytes.size(); at += okld::okb_chunk) {
                     unsigned char c[32];
@@ -367,19 +377,40 @@ int bundle(const std::vector<std::string>& args) {
 
     std::array<unsigned char, 96> signature{};
     std::vector<okld_zip_input> in;
-    in.push_back({ "okb.json", json.data(), json.size(), 0 });
+    in.push_back({ "okb.json", json.data(), json.size(), 0, 0, 0, 0 });
     if (seed) {
         okld_public_key(seed->data(), signature.data());
         okld_sign_message(seed->data(), json.data(), json.size(), signature.data() + 32);
-        in.push_back({ "okb.sig", signature.data(), signature.size(), 0 });
+        in.push_back({ "okb.sig", signature.data(), signature.size(), 0, 0, 0, 0 });
     }
-    for (const auto& [k, m] : members) in.push_back({ k.c_str(), m.bytes.data(), m.bytes.size(), 1 });
+    // COMPRESSED (0.4): each image a DEFLATE stream, which is not mapped and so
+    // not aligned; a runner expands it once, holds it to its digest, and maps
+    // what it expanded.
+    std::vector<std::vector<unsigned char>> deflated;
+    deflated.reserve(members.size());
+    for (const auto& [k, m] : members) {
+        if (!compress) { in.push_back({ k.c_str(), m.bytes.data(), m.bytes.size(), 1, 0, 0, 0 }); continue; }
+        z_stream z{};
+        if (deflateInit2(&z, 9, Z_DEFLATED, -15, 9, Z_DEFAULT_STRATEGY) != Z_OK) { std::println(std::cerr, "okld: the compressor cannot start"); return 1; }
+        std::vector<unsigned char> d(deflateBound(&z, static_cast<uLong>(m.bytes.size())));
+        z.next_in = const_cast<Bytef*>(m.bytes.data());
+        z.avail_in = static_cast<uInt>(m.bytes.size());
+        z.next_out = d.data();
+        z.avail_out = static_cast<uInt>(d.size());
+        const int r = deflate(&z, Z_FINISH);
+        d.resize(z.total_out);
+        deflateEnd(&z);
+        if (r != Z_STREAM_END) { std::println(std::cerr, "okld: {} could not be compressed", k); return 1; }
+        deflated.push_back(std::move(d));
+        const auto& c = deflated.back();
+        in.push_back({ k.c_str(), c.data(), c.size(), 0, 8, m.bytes.size(), okld_crc32(0, m.bytes.data(), m.bytes.size()) });
+    }
     const okld_u64 need = okld_zip_write(in.data(), in.size(), okld::okb_alignment, nullptr, 0);
     std::vector<unsigned char> archive(need);
     okld_zip_write(in.data(), in.size(), okld::okb_alignment, archive.data(), archive.size());
     if (!write_file(out, archive)) { std::println(std::cerr, "okld: {} cannot be written", out); return 1; }
-    std::println("{}: okb {}, {}, {} architecture(s), {} image(s){}, {} bytes", out, okld::okb_version, name,
-                 archs.size(), members.size(), seed ? ", signed" : "", archive.size());
+    std::println("{}: okb {}, {}, {} architecture(s), {} image(s){}{}, {} bytes", out, okb, name,
+                 archs.size(), members.size(), seed ? ", signed" : "", compress ? ", compressed" : "", archive.size());
     return 0;
 }
 
@@ -427,9 +458,12 @@ int bundle_check(const std::vector<std::string>& args) {
     const okld_zip_member* json = nullptr;
     const okld_zip_member* sig = nullptr;
     for (const auto& m : list) {
-        if (member_name(m) == "okb.json") json = &m;
-        if (member_name(m) == "okb.sig") sig = &m;
-        if (m.method != 0 || m.size != m.original) fail(std::format("{}: not stored", member_name(m)));
+        const auto n = member_name(m);
+        if (n == "okb.json") json = &m;
+        if (n == "okb.sig") sig = &m;
+        const bool image = okld_okb_is_image(n.data(), n.size());
+        if (!(m.method == 0 && m.size == m.original) && !(image && m.method == 8))
+            fail(std::format("{}: neither stored nor an image compressed (DEFLATE)", n));
     }
     if (!json) { fail("no okb.json"); return 1; }
     if (okld_okb_admit(a.data(), a.size(), json, nullptr, 0, &why) != 0) { fail(why.text); return 1; }
@@ -468,10 +502,21 @@ int bundle_check(const std::vector<std::string>& args) {
     // needs it.
     std::map<std::string, std::vector<const okld_zip_member*>> by_dir;
     std::set<const okld_zip_member*> refused;
+    // A compressed image's bytes, expanded and held to its digest (0.4).
+    std::map<const okld_zip_member*, std::vector<unsigned char>> expanded;
+    auto image_of = [&](const okld_zip_member* m) -> std::span<const unsigned char> {
+        if (auto e = expanded.find(m); e != expanded.end()) return e->second;
+        return std::span(a.data() + m->data, m->size);
+    };
     for (const auto& m : list) {
         const auto n = member_name(m);
         if (n == "okb.json" || n == "okb.sig" || n.ends_with("/")) continue;
-        if (okld_okb_admit(a.data(), a.size(), &m, text, json->size, &why) != 0) { fail(why.text); refused.insert(&m); }
+        if (m.method == 8) {
+            std::vector<unsigned char> e(m.original);
+            if (okld_okb_expand(a.data(), a.size(), &m, text, json->size, e.data(), e.size(), &why) != 0) { fail(why.text); refused.insert(&m); }
+            else expanded[&m] = std::move(e);
+        }
+        else if (okld_okb_admit(a.data(), a.size(), &m, text, json->size, &why) != 0) { fail(why.text); refused.insert(&m); }
         // The chunks a runner verifies instead, where they are stated: both
         // digests hold, or the okb is refused (docs/okb.md, 0.1.8).
         else if (okld_okb_admit_chunked(a.data(), a.size(), &m, text, json->size, nullptr, nullptr, &why) != 0) {
@@ -490,25 +535,30 @@ int bundle_check(const std::vector<std::string>& args) {
         const okld_okb_arch* arch = nullptr;
         for (const auto& x : std::span(manifest.archs, manifest.arch_count)) if (dir == x.dir) arch = &x;
         g_elsewhere.clear();
-        for (const auto* m : images)
-            okld_exports(a.data() + m->data, m->size, [](const char* n, void*) { g_elsewhere.insert(n); }, nullptr);
+        for (const auto* m : images) {
+            if (refused.contains(m)) continue;
+            const auto b = image_of(m);
+            okld_exports(b.data(), b.size(), [](const char* n, void*) { g_elsewhere.insert(n); }, nullptr);
+        }
         for (const auto* m : images) {
             if (refused.contains(m)) continue;
             const auto n = member_name(*m);
-            const auto* image = a.data() + m->data;
+            const auto bytes = image_of(m);
+            const auto* image = bytes.data();
+            const okld_size image_size = bytes.size();
             okld_info info{};
-            if (okld_read(image, m->size, &info, &why) != 0) { fail(std::format("{}: {}", n, why.text)); continue; }
+            if (okld_read(image, image_size, &info, &why) != 0) { fail(std::format("{}: {}", n, why.text)); continue; }
             const char* machine = okld_okb_arch_of(info.machine);
             if (!arch) fail(std::format("{}: in {}/, which okb.json names no architecture for", n, dir));
             else if (!machine || std::string_view(machine) != arch->name)
                 fail(std::format("{}: an image of {}, in the directory of {}", n, machine ? machine : "another architecture", arch->name));
             unsigned char key[32];
-            const int v = okld_verify(image, m->size, key);
+            const int v = okld_verify(image, image_size, key);
             if (v < 0) fail(std::format("{}: its signature does not hold", n));
             else if (v == 0 && require) fail(std::format("{}: not signed, and a signature is required", n));
             else if (v == 1 && !is_trusted(key)) fail(std::format("{}: signed by {}, which is not trusted", n, hex(key, 32)));
             struct ctx { std::string* name; int* failures; const std::string* path; } c{ const_cast<std::string*>(&n), &failures, &path };
-            okld_check(image, m->size,
+            okld_check(image, image_size,
                 [](const char* x, void*) { return surface().contains(x) ? 1 : 0; },
                 [](const char* x, void*) { return g_elsewhere.contains(x) ? 1 : 0; },
                 [](const char* sentence, void* p) {
@@ -516,7 +566,7 @@ int bundle_check(const std::vector<std::string>& args) {
                     std::println(std::cerr, "okld: {}: {}: {}", *c.path, *c.name, sentence);
                     ++*c.failures;
                 }, &c);
-            okld_check_placement(image, m->size,
+            okld_check_placement(image, image_size,
                 [](const char* sentence, void* p) {
                     auto& c = *static_cast<ctx*>(p);
                     std::println(std::cerr, "okld: {}: {}: {}", *c.path, *c.name, sentence);

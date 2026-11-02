@@ -106,6 +106,19 @@ void  okrun_close(struct okrun_library* library);
  * null measures nothing. Without a call, OKRUN_PROF is read. */
 void okrun_profile(const char* spec);
 
+/* --- what the runner keeps for this machine (0.4) ------------------------- */
+
+/* Each file of the runner's cache --- a base for each boot, an image's data
+ * prepared for it (`.okseg'), a snapshot of its initialisers (`.oksnap') and its
+ * marker (`.sealing') --- with its size, and whether it was prepared for this
+ * boot; returns the bytes they hold. */
+unsigned long long okrun_cache_list(void (*each)(const char* name, unsigned long long bytes, int this_boot, void* ctx),
+                                    void* ctx);
+/* Removes what was prepared for another boot, or (`all' non-zero) everything
+ * the runner keeps, its remembered admissions and digests included; returns the
+ * bytes removed. */
+unsigned long long okrun_cache_reclaim(int all);
+
 /* The names this runner binds (the specification's surface), `count' of them. */
 const char* const* okrun_names(unsigned long* count);
 

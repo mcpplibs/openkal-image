@@ -153,7 +153,9 @@ extern "C" okld_u64 okld_zip_write(const okld_zip_input* in, okld_size count, ok
         for (okld_size i = 0; i < count; ++i) {
             const auto& m = in[i];
             const u64 name_len = length(m.name);
-            const bool big = m.size >= kMax32;
+            const bool deflated = m.method == 8;
+            const u64 original = deflated ? m.original : m.size;
+            const bool big = m.size >= kMax32 || original >= kMax32;
             u64 extra = big ? 20 : 0;
             if (m.align && alignment > 1) {
                 // The bytes begin after 30 + name + extra; the field that pads
@@ -170,16 +172,16 @@ extern "C" okld_u64 okld_zip_write(const okld_zip_input* in, okld_size count, ok
             w.w32(kLocal);
             w.w16(big ? 45 : 20);
             w.w16(0);                              // flags
-            w.w16(0);                              // stored
+            w.w16(deflated ? 8 : 0);               // stored, or DEFLATE
             w.w16(kDosTime); w.w16(kDosDate);
-            const u32 crc = okld_crc32(0, m.bytes, m.size);
+            const u32 crc = deflated ? m.crc32 : okld_crc32(0, m.bytes, m.size);
             w.w32(crc);
             w.w32(big ? u32(kMax32) : u32(m.size));
-            w.w32(big ? u32(kMax32) : u32(m.size));
+            w.w32(big ? u32(kMax32) : u32(original));
             w.w16(u16(name_len));
             w.w16(u16(extra));
             w.bytes(m.name, name_len);
-            if (big) { w.w16(kZip64Field); w.w16(16); w.w64(m.size); w.w64(m.size); extra -= 20; }
+            if (big) { w.w16(kZip64Field); w.w16(16); w.w64(original); w.w64(m.size); extra -= 20; }
             if (extra > 0) { w.w16(kAlignField); w.w16(u16(extra - 4)); w.w32(alignment); w.zeros(extra - 8); }
             w.bytes(m.bytes, m.size);
         }
@@ -192,7 +194,9 @@ extern "C" okld_u64 okld_zip_write(const okld_zip_input* in, okld_size count, ok
             for (okld_size i = 0; i < count; ++i) {
                 const auto& m = in[i];
                 const u64 name_len = length(m.name);
-                const bool big = m.size >= kMax32;
+                const bool deflated = m.method == 8;
+                const u64 original = deflated ? m.original : m.size;
+                const bool big = m.size >= kMax32 || original >= kMax32;
                 u64 extra = big ? 20 : 0;
                 if (m.align && alignment > 1) {
                     u64 r = (alignment - (c.at + 30 + name_len + extra) % alignment) % alignment;
@@ -201,17 +205,17 @@ extern "C" okld_u64 okld_zip_write(const okld_zip_input* in, okld_size count, ok
                 }
                 const u64 header = c.at;
                 c.at += 30 + name_len + extra + m.size;
-                const u32 crc = okld_crc32(0, m.bytes, m.size);
+                const u32 crc = deflated ? m.crc32 : okld_crc32(0, m.bytes, m.size);
                 const bool big_at = header >= kMax32;
                 const u64 extra_c = (big ? 16 : 0) + (big_at ? 8 : 0);
                 w.w32(kCentral);
                 w.w16((3 << 8) | ((big || big_at) ? 45 : 20));   // made by: UNIX
                 w.w16((big || big_at) ? 45 : 20);
-                w.w16(0); w.w16(0);
+                w.w16(0); w.w16(deflated ? 8 : 0);
                 w.w16(kDosTime); w.w16(kDosDate);
                 w.w32(crc);
                 w.w32(big ? u32(kMax32) : u32(m.size));
-                w.w32(big ? u32(kMax32) : u32(m.size));
+                w.w32(big ? u32(kMax32) : u32(original));
                 w.w16(u16(name_len));
                 w.w16(u16(extra_c ? extra_c + 4 : 0));
                 w.w16(0); w.w16(0); w.w16(0);
@@ -220,7 +224,7 @@ extern "C" okld_u64 okld_zip_write(const okld_zip_input* in, okld_size count, ok
                 w.bytes(m.name, name_len);
                 if (extra_c) {
                     w.w16(kZip64Field); w.w16(u16(extra_c));
-                    if (big) { w.w64(m.size); w.w64(m.size); }
+                    if (big) { w.w64(original); w.w64(m.size); }
                     if (big_at) w.w64(header);
                 }
             }

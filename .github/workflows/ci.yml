@@ -112,6 +112,34 @@ jobs:
           "$OKLD" bundle out/resident.okb out/x86_64/resident.oke out/aarch64/resident.oke
           "$OKLD" bundle out/needed.okb --entry needed.oke \
             out/x86_64/needed.oke out/x86_64/liboktwice.okso out/aarch64/needed.oke out/aarch64/liboktwice.okso
+          # COMPRESSED (okb 2, 0.4.0): the economy form, its images DEFLATE.
+          "$OKLD" bundle out/needed-z.okb --compress --entry needed.oke \
+            out/x86_64/needed.oke out/x86_64/liboktwice.okso out/aarch64/needed.oke out/aarch64/liboktwice.okso
+          "$OKLD" bundle check out/needed-z.okb
+          python3 - out/needed-z.okb <<'PY'
+          import json, sys, zipfile
+          z = zipfile.ZipFile(sys.argv[1])
+          assert z.testzip() is None
+          for i in z.infolist():
+              want = 8 if i.filename.endswith(('.oke', '.okso')) else 0
+              assert i.compress_type == want, (i.filename, i.compress_type)
+          assert json.loads(z.read('okb.json'))['okb'] == 2
+          print('  ok  a compressed okb: its images DEFLATE, its manifest stored, version 2')
+          PY
+          python3 - out/needed-z.okb out/tampered-z.okb <<'PY'
+          import sys, zipfile
+          d = bytearray(open(sys.argv[1], 'rb').read())
+          i = zipfile.ZipFile(sys.argv[1]).getinfo('x86_64/liboktwice.okso')
+          import struct
+          n, e = struct.unpack('<HH', d[i.header_offset + 26:i.header_offset + 30])
+          d[i.header_offset + 30 + n + e + i.compress_size // 2] ^= 1
+          i = zipfile.ZipFile(sys.argv[1]).getinfo('aarch64/liboktwice.okso')
+          n, e = struct.unpack('<HH', d[i.header_offset + 26:i.header_offset + 30])
+          d[i.header_offset + 30 + n + e + i.compress_size // 2] ^= 1
+          open(sys.argv[2], 'wb').write(d)
+          PY
+          if "$OKLD" bundle check out/tampered-z.okb 2> tampered-z.txt; then echo "::error::a changed compressed okb passed bundle check"; exit 1; fi
+          cat tampered-z.txt
           "$OKLD" bundle out/signed.okb --sign "$RUNNER_TEMP/seed" --entry needed.oke \
             out/x86_64/needed.oke out/x86_64/liboktwice.okso out/aarch64/needed.oke out/aarch64/liboktwice.okso
           # From a universal package mcpp staged (mcpp-package.json, SPEC-014 §4.5).
@@ -307,6 +335,17 @@ jobs:
           out=$(OKRUN_SNAPSHOT=0 run snapshot); expect "$out" 'started by its initialisers' 'OKRUN_SNAPSHOT=0 used the snapshot'
           out=$(run snapshot-timed); expect "$out" 'started by its initialisers' 'an image refused a snapshot started from one'
           echo "  ok  a snapshot is made once, used, compared, declined and refused"
+          # WHAT THE RUNNER KEEPS (0.4.0): listed, and an economy start writes
+          # nothing to it.
+          "$OKRUN" cache | tee cache.txt
+          grep -q '\.oksnap' cache.txt || { echo "::error::okrun cache lists no snapshot"; exit 1; }
+          export OKRUN_CACHE="$RUNNER_TEMP/okcache-economy"
+          mkdir -p "$OKRUN_CACHE"
+          KAL_RESOURCES=economy "$OKRUN" "out/$a/snapshot.oke" > /dev/null
+          sleep 1
+          if ls "$OKRUN_CACHE" | grep -qv '^boot$'; then echo "::error::an economy start wrote to the cache"; ls "$OKRUN_CACHE"; exit 1; fi
+          "$OKRUN" cache gc --all
+          echo "  ok  okrun cache lists what it keeps; an economy start writes nothing"
       - name: The refusals
         run: |
           a='${{ matrix.arch }}'
@@ -344,6 +383,16 @@ jobs:
           OKRUN_PATH="nowhere${sep}${here}/path" "$OKRUN" alone.okb | tr -d '\r' | grep -q "twice(21) = 42" \
             || { echo "::error::OKRUN_PATH"; exit 1; }
           echo "  ok  the okb runs; an unsigned or changed okb is refused; OKRUN_PATH is searched"
+          # COMPRESSED (0.4.0): expanded once into the user's cache, then mapped
+          # from there; a changed byte of it is refused.
+          export XDG_CACHE_HOME="$RUNNER_TEMP/xdg"
+          for i in 1 2; do
+            z=$("$OKRUN" out/needed-z.okb | tr -d '\r')
+            grep -q "twice(21) = 42, next_value() = 41" <<<"$z" || { echo "::error::a compressed okb, start $i"; echo "$z"; exit 1; }
+          done
+          if "$OKRUN" out/tampered-z.okb 2> e7.txt; then echo "::error::a changed compressed okb ran"; exit 1; fi
+          cat e7.txt
+          echo "  ok  a compressed okb runs, expanded once; a changed one is refused"
       - name: What stays resident once an image is loaded (Linux)
         if: runner.os == 'Linux'
         run: |

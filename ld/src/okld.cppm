@@ -26,6 +26,8 @@ export using ::okld_sign;
 export using ::okld_verify;
 export using ::okld_public_key;
 export using ::okld_load;
+export using ::okld_okb_expand;
+export using ::okld_inflate;
 export using ::okld_bound_imports;
 export using ::okld_initialise;
 export using ::okld_finalise;

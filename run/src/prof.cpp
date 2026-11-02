@@ -478,6 +478,19 @@ bool profile_calls() { return (mode() & asked_calls) != 0; }
 bool profile_samples() { return (mode() & asked_samples) != 0; }
 bool profile_touches() { return (mode() & asked_touch) != 0; }
 
+// WHAT THE RUNNER CHOSE AT EACH POINT A RESOURCE IS SPENT (0.4, mcpp design
+// 2026-11-03 part 4 §16): the placement's data, the snapshot, what is read
+// ahead --- each with its outcome and the bytes it holds.
+struct note { const char* point; const char* outcome; kal_u64 bytes; };
+note g_notes[8];
+unsigned g_note_count = 0;
+
+void profile_note(const char* point, const char* outcome, kal_u64 bytes) {
+    lock();
+    if (g_note_count < 8) g_notes[g_note_count++] = note{ point, outcome, bytes };
+    unlock();
+}
+
 void profile_phase(const char* name) {
     if (!(mode() & asked_phases)) return;
     lock();
@@ -659,6 +672,16 @@ void profile_finish() {
         b.put(" }");
     }
     b.put(g_moment_count ? "\n  ]" : "]");
+    // WHAT THE RUNNER CHOSE (0.4).
+    b.put(",\n  \"runner\": [");
+    for (unsigned i = 0; i < g_note_count; ++i) {
+        b.put(i ? ",\n    { \"point\": " : "\n    { \"point\": ");
+        b.quoted(g_notes[i].point);
+        b.put(", \"outcome\": "); b.quoted(g_notes[i].outcome);
+        b.put(", \"bytes\": "); b.number(g_notes[i].bytes);
+        b.put(" }");
+    }
+    b.put(g_note_count ? "\n  ]" : "]");
     // SAMPLES, AS STACKS (0.4): the outermost frame first, `;' between, as
     // a folded stack is written.
     // A TIMELINE beside them: each sample's time, from the start, and its

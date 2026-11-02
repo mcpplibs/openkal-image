@@ -278,12 +278,18 @@ struct search {
     char ran_path[1024] = {};
     char needed_path[16][1024] = {};
     char needed_name[16][256] = {};
+    // A member of the archive expanded into a file of the cache (0.4): its
+    // name in the archive, beside the file it is held in.
+    char needed_member[16][256] = {};
 };
 
 // The file a run's image or okb was read from, given back once the image is
 // loaded: its pages are no longer resident beside the image's own.
 void release_ran(search& s) {
     if (s.prepared.data) release_file(s.prepared);
+    // A member expanded for the entry, held until the image was loaded.
+    for (unsigned k = 0; k < 16; ++k)
+        if (s.needed[k].data && s.needed_member[k][0]) { release_file(s.needed[k]); s.needed_member[k][0] = 0; }
     if (!s.ran.data) return;
     if (s.archive == s.ran.data) { s.archive = nullptr; s.archive_size = 0; s.json = nullptr; s.json_size = 0; }
     release_file(s.ran);
@@ -490,12 +496,15 @@ memo_place g_memo;
 bool g_memo_opened = false;
 
 // A member of the archive by name, admitted (stored, aligned, its stated content).
+const void* expanded_member(search& s, const okld_zip_member& m, const char* member, unsigned long long& size);
+
 const void* archive_member(search& s, const char* member, unsigned long long& size) {
     okld_zip_member m{};
     okld_why why{};
     if (okld_zip_find(s.archive, s.archive_size, member, &m, &why) != 0) return nullptr;
     copy_text(s.member, sizeof s.member, member);
     if (!g_memo_opened) { g_memo_opened = true; memo_open(s, g_memo); }
+    if (m.method == 8) return expanded_member(s, m, member, size);
     if (memo_holds(g_memo, member)) {
         // Compared before, on this file as it is: its shape alone is asked,
         // and no byte of it is read (0.3.1: the CRC-32 the archive states was
@@ -577,9 +586,11 @@ const void* find_needed(const char* name, okld_size* size, void* ctx) {
     unsigned long long n = 0;
     for (unsigned long i = 0; !bytes && i < s.image_count; ++i)
         if (same(s.images[i].name, name)) { bytes = s.images[i].bytes; n = s.images[i].size; }
+    bool expanded = false;
     if (!bytes && s.archive) {
         bytes = archive_image(s, name, n);
         if (!bytes && s.refusal[0]) return nullptr;
+        for (const auto& h : s.needed) expanded = expanded || (bytes && h.data == bytes);
     }
     file_bytes f;
     char found[1024] = {};
@@ -600,6 +611,8 @@ const void* find_needed(const char* name, okld_size* size, void* ctx) {
         *slot = f;
         copy_text(s.needed_path[k], sizeof s.needed_path[k], found);
         copy_text(s.needed_name[k], sizeof s.needed_name[k], name);
+    } else if (expanded) {
+        // Held in its slot, and named there, until the loader gives it back.
     } else if (s.archive && bytes >= s.archive && bytes < s.archive + s.archive_size) {
         profile_loaded(name, bytes, n, s.ran_path[0] ? s.ran_path : nullptr,
                        static_cast<kal_u64>(static_cast<const unsigned char*>(bytes) - s.archive));
@@ -622,6 +635,7 @@ void release_needed(const void* bytes, okld_size, void* ctx) {
         profile_loaded(s.needed_name[k], h.data, h.size, s.needed_path[k], 0);
         profile_settle();
         release_file(h);
+        s.needed_member[k][0] = 0;
         return;
     }
 }
@@ -662,21 +676,51 @@ int seal(void* region, okld_size offset, okld_size size, int forever, void*) {
     return kal_exec_seal_part(region, offset, size, forever ? KAL_EXEC_SEAL_FOREVER : 0) == kal_ok ? 0 : -1;
 }
 
-// WHETHER THE PAGES A START TOUCHES ARE READ IN AHEAD OF IT (0.4): memory spent
-// for time, as the program's resource preference says (openkal 0.23) --- always
-// for performance, never for economy, and where memory is plentiful (a quarter
-// of it available) when balanced.
-bool prefetching() {
+// WHAT THIS START SPENDS RESOURCES FOR (0.4, openkal 0.23; mcpp design
+// 2026-11-03 part 4 §16): the program's preference, and balanced taken as
+// economy where what it would spend runs short --- memory below 15 % of the
+// machine's available, or the volume of the runner's cache below 1 GiB free.
+enum class spend { performance, balanced, economy };
+
+spend preference() {
     switch (kal_env_resources()) {
-        case KAL_RESOURCES_PERFORMANCE: return true;
-        case KAL_RESOURCES_ECONOMY:     return false;
-        default: {
-            kal_memory_status m{};
-            m.self_size = sizeof m;
-            if (kal_memory_info(&m) != kal_ok || !(m.present & KAL_MSTATUS_AVAILABLE) || !(m.present & KAL_MSTATUS_TOTAL))
-                return false;
-            return m.available_bytes >= m.total_bytes / 4;
-        }
+        case KAL_RESOURCES_PERFORMANCE: return spend::performance;
+        case KAL_RESOURCES_ECONOMY:     return spend::economy;
+        default:                        return spend::balanced;
+    }
+}
+
+spend memory_spend() {
+    const spend p = preference();
+    if (p != spend::balanced) return p;
+    kal_memory_status m{};
+    m.self_size = sizeof m;
+    if (kal_memory_info(&m) != kal_ok || !(m.present & KAL_MSTATUS_AVAILABLE) || !(m.present & KAL_MSTATUS_TOTAL))
+        return spend::balanced;
+    return m.available_bytes * 100 < m.total_bytes * 15 ? spend::economy : spend::balanced;
+}
+
+spend disk_spend(kal_dir cache) {
+    const spend p = preference();
+    if (p != spend::balanced || !(kal_fs_props(cache) & KAL_FS_PROP_CAPACITY)) return p;
+    kal_u64 total = 0, available = 0;
+    if (kal_fs_capacity(cache, &total, &available) != kal_ok) return p;
+    return available < (1ull << 30) ? spend::economy : spend::balanced;
+}
+
+// WHAT IS READ IN AHEAD OF A START (okld_host::prefetch): the pages it touches,
+// and for performance the data of an image at its base too; nothing for
+// economy. OKRUN_PREFETCH=0, `touch' or `all' states it.
+int prefetching() {
+    char v[8];
+    const kal_intptr n = kal_env_var("OKRUN_PREFETCH", 14, v, sizeof v);
+    if (n == 1 && v[0] == '0') return 0;
+    if (n == 5 && same_bytes(v, "touch", 5)) return 1;
+    if (n == 3 && same_bytes(v, "all", 3)) return 2;
+    switch (memory_spend()) {
+        case spend::performance: return 2;
+        case spend::economy:     return 0;
+        default:                 return 1;
     }
 }
 
@@ -693,7 +737,7 @@ void prepare_host(search& s, bool permanent) {
     host.ctx = &s;
     host.seal = &seal;
     host.permanent = permanent ? 1 : 0;
-    host.prefetch = prefetching() ? 1 : 0;
+    host.prefetch = prefetching();
 }
 
 
@@ -780,6 +824,72 @@ bool write_whole(kal_dir dir, const char* name, const void* bytes, unsigned long
     return true;
 }
 
+// A MEMBER STORED COMPRESSED (docs/okb.md, 0.4): expanded once into the
+// user's cache (`okrun/expanded', named by the manifest's digest and the
+// member), held to the digest the manifest states, and mapped from there as
+// an image's own file is --- its instructions the file's pages. A later start
+// of the same okb file, whose admission is remembered, maps it again without
+// expanding. Held in a slot of `needed' until the image is loaded.
+const void* expanded_member(search& s, const okld_zip_member& m, const char* member, unsigned long long& size) {
+    static const char* const below[] = { "okrun", "expanded" };
+    owned_dir dir;
+    if (!s.json || !user_cache(below, 2, dir.d, &dir.own)) {
+        copy_text(s.refusal, sizeof s.refusal, "a compressed member is expanded into the user's cache, which cannot be had");
+        return nullptr;
+    }
+    unsigned k = 0;
+    while (k < 16 && s.needed[k].data) ++k;
+    if (k == 16) { copy_text(s.refusal, sizeof s.refusal, "more than sixteen files are needed at once"); return nullptr; }
+    char name[96];
+    {
+        unsigned char j[32], d[32];
+        okld_sha256(s.json, s.json_size, j);
+        okld_sha256(member, length(member), d);
+        char hj[33], hd[33];
+        to_hex(j, 16, hj);
+        to_hex(d, 16, hd);
+        const unsigned long n = length(member);
+        const bool library = n > 5 && same_bytes(member + n - 5, ".okso", 5);
+        text(name, sizeof name) << hj << "-" << hd << (library ? ".okso" : ".oke");
+    }
+    auto map_expanded = [&]() -> bool {
+        kal_file f{};
+        if (kal_fs_open(dir.d, name, length(name), KAL_OPEN_READ, &f) != kal_ok) return false;
+        file_bytes fb;
+        if (!map_all(f, fb)) { kal_fs_close_file(f); return false; }
+        if (fb.size != m.original) { release_file(fb); return false; }
+        s.needed[k] = fb;
+        return true;
+    };
+    bool held = memo_holds(g_memo, member) && map_expanded();
+    if (!held) {
+        void* out = kal_alloc(m.original ? m.original : 1, 16);
+        if (!out) { copy_text(s.refusal, sizeof s.refusal, "no memory to expand a compressed member"); return nullptr; }
+        okld_why why{};
+        const bool good = okld_okb_expand(s.archive, s.archive_size, &m, s.json, s.json_size, out, m.original, &why) == 0
+                       && write_whole(dir.d, name, out, m.original);
+        if (!good) copy_text(s.refusal, sizeof s.refusal, why.text[0] ? why.text : "a compressed member could not be expanded");
+        kal_free(out, m.original ? m.original : 1, 16);
+        if (!good || !map_expanded()) return nullptr;
+        memo_record(g_memo, member);
+        profile_note("okb", "a compressed member expanded into the cache", m.original);
+    }
+    // Where the expanded file is, for a measurement and openkal.debug.
+    char where[1024];
+    {
+        text t(where, sizeof where);
+        char base[1024];
+        const kal_intptr n = kal_fs_resolved_name(dir.d, ".", 1, base, sizeof base - 1);
+        if (n > 0 && n < static_cast<kal_intptr>(sizeof base)) { base[n] = 0; t << base << "/" << name; }
+        else t << name;
+    }
+    copy_text(s.needed_path[k], sizeof s.needed_path[k], where);
+    copy_text(s.needed_name[k], sizeof s.needed_name[k], member);
+    copy_text(s.needed_member[k], sizeof s.needed_member[k], member);
+    size = m.original;
+    return s.needed[k].data;
+}
+
 unsigned long long parse_number(const char*& p) {
     unsigned long long v = 0;
     while (*p >= '0' && *p <= '9') v = v * 10 + static_cast<unsigned long long>(*p++ - '0');
@@ -831,6 +941,9 @@ bool image_digest(search& s, const void* bytes, unsigned long long size, unsigne
     const auto* b = static_cast<const unsigned char*>(bytes);
     if (s.json && s.archive && b >= s.archive && b < s.archive + s.archive_size && s.member[0])
         return okld_okb_digest(s.json, s.json_size, s.member, out) == 1;
+    for (unsigned k = 0; s.json && k < 16; ++k)
+        if (s.needed[k].data == b && s.needed_member[k][0])
+            return okld_okb_digest(s.json, s.json_size, s.needed_member[k], out) == 1;
     if (!s.ran_path[0] || !s.ran.data || b < s.ran.data || b >= s.ran.data + s.ran.size) return false;
     kal_dir dir{};
     const char* rest = nullptr;
@@ -891,6 +1004,15 @@ struct local_place {
     char               stem[64] = {};
 };
 
+// Why an image is not at a base of this boot: what the policy or the image says.
+const char* placementless() {
+    switch (placement_policy()) {
+        case policy::sealed:   return "the sealed base (OKRUN_PLACE=sealed)";
+        case policy::anywhere: return "anywhere (OKRUN_PLACE=0)";
+        default:               return "the sealed base or anywhere: no base of this boot";
+    }
+}
+
 bool local_place_of(search& s, const void* bytes, unsigned long long size, local_place& lp) {
     if (placement_policy() != policy::local || !s.host.reserve_at) return false;
     okld_u64 sealed = 0; okld_u32 count = 0;
@@ -939,17 +1061,32 @@ bool map_prepared(const local_place& lp, const char* suffix, file_bytes& out, ok
 bool prepare_local(search& s, const void* bytes, unsigned long long size, const local_place& lp) {
     okld_prepared_info info{};
     auto plain = [](const okld_prepared_info& i, const local_place&) { return i.flags == 0; };
-    if (map_prepared(lp, ".okseg", s.prepared, info, plain)) return true;
+    if (map_prepared(lp, ".okseg", s.prepared, info, plain)) {
+        profile_note("placement", "the boot's prepared copy", s.prepared.size);
+        return true;
+    }
     okld_why why{};
     const okld_u64 need = okld_prepare(bytes, size, lp.base, lp.digest, nullptr, 0, &why);
     if (need == 0) return false;
     void* buffer = kal_alloc(need, 16);
     if (!buffer) return false;
+    if (okld_prepare(bytes, size, lp.base, lp.digest, buffer, need, &why) != need) { kal_free(buffer, need, 16); return false; }
+    // FOR ECONOMY, NOTHING WRITTEN (§16): the data for this boot's base is
+    // computed for this start and copied from memory, as an image anywhere is
+    // relocated at every start.
+    if (disk_spend(lp.dir.d) == spend::economy) {
+        s.prepared = file_bytes{};
+        s.prepared.data = static_cast<unsigned char*>(buffer);
+        s.prepared.size = need;
+        s.prepared.cap = need;
+        profile_note("placement", "computed for this start", need);
+        return true;
+    }
     char name[96];
     place_name(lp, ".okseg", name);
-    const bool made = okld_prepare(bytes, size, lp.base, lp.digest, buffer, need, &why) == need
-                   && write_whole(lp.dir.d, name, buffer, need);
+    const bool made = write_whole(lp.dir.d, name, buffer, need);
     kal_free(buffer, need, 16);
+    if (made) profile_note("placement", "prepared for this boot", need);
     return made && map_prepared(lp, ".okseg", s.prepared, info, plain);
 }
 
@@ -1006,8 +1143,22 @@ bool snapshot_found(search& s, const local_place& lp, okld_prepared_info& info) 
     if (!map_prepared(lp, ".oksnap", s.prepared, info, made_here)) return false;
     if (info.kept_size && !seal_kept_holds(s.prepared.data + info.kept, info.kept_size)) {
         release_file(s.prepared);
+        profile_note("snapshot", "declined: a named value the initialisers read differs", 0);
         return false;
     }
+    // USED: its time is the last use, by which the least recently used is
+    // removed first when the snapshots outgrow their bound (written at most
+    // once an hour).
+    kal_node_info node{};
+    node.self_size = sizeof node;
+    const kal_u64 now = kal_time_wall();
+    if (kal_fs_file_info(s.prepared.file, KAL_INFO_MODIFIED, &node) == kal_ok && (node.present & KAL_INFO_MODIFIED)
+        && node.modified_ns + 3600ull * 1000000000ull < now) {
+        char name[96];
+        place_name(lp, ".oksnap", name);
+        kal_fs_set_modified_at(lp.dir.d, name, length(name), now);
+    }
+    profile_note("snapshot", "used", s.prepared.size);
     return true;
 }
 
@@ -1077,9 +1228,9 @@ bool start_again(const char* value, kal_process& out) {
 
 // ONCE IN A BOOT FOR AN IMAGE: the marker is made exclusively, and only the
 // start that made it starts the runner that makes the snapshot. Not for a
-// program that asked to spend nothing ahead of it (openkal 0.23, economy).
+// program that spends nothing ahead of it (economy, §16).
 void start_making(const local_place& lp) {
-    if (kal_env_resources() == KAL_RESOURCES_ECONOMY) return;
+    if (disk_spend(lp.dir.d) == spend::economy) return;
     char name[96];
     place_name(lp, ".sealing", name);
     kal_file f{};
@@ -1216,6 +1367,48 @@ void prove_range(kal_u64 from, kal_u64 to, void* ctx) {
     }
 }
 
+// THE SNAPSHOTS' BOUND (§16): 2 GiB for performance, 512 MiB balanced; the
+// least recently used are removed until a new one of `bytes' fits, each
+// marker left saying so, so that it is not made again in the boot.
+void make_room(const local_place& lp, kal_u64 bytes) {
+    const kal_u64 bound = preference() == spend::performance ? (2ull << 30) : (512ull << 20);
+    if (bytes > bound) seal_refused("the snapshot is larger than the snapshots' bound");
+    struct held { char name[96]; kal_u64 size, used; } snaps[64];
+    unsigned count = 0;
+    kal_u64 total = 0;
+    kal_uintptr iter = 0;
+    if (kal_fs_list_begin(lp.dir.d, &iter) != kal_ok) return;
+    while (iter != 0 && count < 64) {
+        char name[96]; kal_uintptr n = 0;
+        kal_node_info info{};
+        info.self_size = sizeof info;
+        int kind = 0;
+        if (kal_fs_list_next(lp.dir.d, &iter, name, sizeof name - 1, &n, &kind) != kal_ok || iter == 0) break;
+        if (n < 8 || n >= sizeof name || !same_bytes(name + n - 7, ".oksnap", 7)) continue;
+        if (kal_fs_info(lp.dir.d, name, n, 0, KAL_INFO_SIZE | KAL_INFO_MODIFIED, &info) != kal_ok) continue;
+        for (kal_uintptr k = 0; k < n; ++k) snaps[count].name[k] = name[k];
+        snaps[count].name[n] = 0;
+        snaps[count].size = info.size;
+        snaps[count].used = info.modified_ns;
+        total += info.size;
+        ++count;
+    }
+    while (total + bytes > bound && count > 0) {
+        unsigned oldest = 0;
+        for (unsigned i = 1; i < count; ++i) if (snaps[i].used < snaps[oldest].used) oldest = i;
+        const auto& o = snaps[oldest];
+        kal_fs_remove(lp.dir.d, o.name, length(o.name));
+        char marker[96];
+        text(marker, sizeof marker) << o.name;
+        const unsigned long stem = length(marker) - 7;
+        text(marker + stem, sizeof marker - stem) << ".sealing";
+        static const char line[] = "removed: the least recently used, beyond the snapshots' bound\n";
+        write_whole(lp.dir.d, marker, line, sizeof line - 1);
+        total -= o.size;
+        snaps[oldest] = snaps[--count];
+    }
+}
+
 [[noreturn]] void make_snapshot(search& s, const void* bytes, unsigned long long size, const char* name) {
     local_place lp;
     if (!local_place_of(s, bytes, size, lp)) seal_refused("the image is not placed at a base of this boot");
@@ -1315,6 +1508,7 @@ void prove_range(kal_u64 from, kal_u64 to, void* ctx) {
     *record = snapshot_record{ arena_at, used, 0, 0, kSealContext };
     char file[96];
     place_name(lp, ".oksnap", file);
+    make_room(lp, total);
     if (okld_prepare_blocks(&info, l.b, live, nullptr, kept, kept_size, out, total) != total
         || !write_whole(lp.dir.d, file, out, total))
         seal_refused("its file cannot be written");
@@ -1348,6 +1542,8 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     const snapshotting snapshot = snapshot_mode();
     if (snapshot == snapshotting::make) make_snapshot(s, bytes, size, name);
     profile_phase("admitted");
+    profile_note("prefetch", s.host.prefetch == 2 ? "the touched pages and the data"
+                             : s.host.prefetch == 1 ? "the touched pages" : "nothing", 0);
     okld_module* m = nullptr;
     okld_why reason{};
     // FROM THE SNAPSHOT OF THIS BOOT'S BASE, where there is one; at that base
@@ -1367,7 +1563,10 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
         loaded = okld_load_prepared(bytes, size, name, &s.host, s.prepared.data, s.prepared.size, &m, &reason);
         if (loaded != 0) { release_file(s.prepared); reason = okld_why{}; }
     }
-    if (loaded != 0) loaded = okld_load(bytes, size, name, &s.host, &m, &reason);
+    if (loaded != 0) {
+        profile_note("placement", local ? "this boot's base could not be had" : placementless(), 0);
+        loaded = okld_load(bytes, size, name, &s.host, &m, &reason);
+    }
     if (loaded != 0) {
         if (s.refusal[0]) text(why, cap) << name << ": " << s.refusal;
         else text(why, cap) << name << ": " << reason.text;
@@ -1381,7 +1580,9 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     {
         const auto* b = static_cast<const unsigned char*>(bytes);
         const bool fromRan = s.ran.data && b >= s.ran.data && b < s.ran.data + s.ran.size;
-        profile_loaded(name, bytes, size, fromRan && s.ran_path[0] ? s.ran_path : nullptr,
+        const char* expanded = nullptr;
+        for (unsigned k = 0; k < 16; ++k) if (s.needed[k].data == b && s.needed_member[k][0]) expanded = s.needed_path[k];
+        profile_loaded(name, bytes, size, expanded ? expanded : fromRan && s.ran_path[0] ? s.ran_path : nullptr,
                        fromRan ? static_cast<kal_u64>(b - s.ran.data) : 0);
     }
     profile_phase("loaded");
@@ -1389,8 +1590,12 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     release_ran(s);
     // An image whose C library takes part, at this boot's base and without a
     // snapshot, has one made for the starts after this one.
-    if (local && snapshot == snapshotting::use && !from_snapshot && okld_symbol(m, kSnapshotRecord))
+    if (local && snapshot == snapshotting::use && !from_snapshot && okld_symbol(m, kSnapshotRecord)) {
+        profile_note("snapshot", "none for this boot", 0);
         start_making(lp);
+    } else if (snapshot == snapshotting::off) {
+        profile_note("snapshot", "not used (OKRUN_SNAPSHOT=0)", 0);
+    }
     profile_begin_run();
     if (from_snapshot) {
         // THE SECOND PHASE: the C library takes what this start supplies. A
@@ -1597,6 +1802,86 @@ extern "C" int okrun_run_images(const okrun_image* images, unsigned long count, 
             return enter(s, images[i].bytes, images[i].size, images[i].name, argc, argv, why, cap);
     text(why, cap) << "the group of images has no " << (entry ? entry : "entry");
     return -1;
+}
+
+// --- what the runner keeps for this machine (0.4) ---------------------------------
+
+namespace {
+
+// Whether the cache's boot record is this boot's (boot_slide's rule).
+bool this_boot(kal_dir dir) {
+    const unsigned long long began = kal_time_wall() - kal_time_monotonic();
+    char have[128];
+    if (read_small(dir, "boot", have, sizeof have) <= 0) return false;
+    const char* p = have;
+    parse_number(p);
+    if (*p == ' ') ++p;
+    const unsigned long long b0 = parse_number(p);
+    const unsigned long long apart = b0 > began ? b0 - began : began - b0;
+    return apart <= 2000000000ull;
+}
+
+bool prepared_name(const char* name, kal_uintptr n) {
+    return (n > 6 && same_bytes(name + n - 6, ".okseg", 6)) || (n > 7 && same_bytes(name + n - 7, ".oksnap", 7))
+        || (n > 8 && same_bytes(name + n - 8, ".sealing", 8));
+}
+
+// Each file of a directory, with its size, through `each'; `remove' removes
+// those it answers true for. Returns the bytes of those answered true.
+template <class F>
+unsigned long long each_file(kal_dir dir, F&& f) {
+    unsigned long long bytes = 0;
+    kal_uintptr iter = 0;
+    if (kal_fs_list_begin(dir, &iter) != kal_ok) return 0;
+    while (iter != 0) {
+        char name[256]; kal_uintptr n = 0; int kind = 0;
+        if (kal_fs_list_next(dir, &iter, name, sizeof name - 1, &n, &kind) != kal_ok || iter == 0) break;
+        if (n == 0 || n >= sizeof name) continue;
+        name[n] = 0;
+        kal_node_info info{};
+        info.self_size = sizeof info;
+        if (kal_fs_info(dir, name, n, 0, KAL_INFO_SIZE | KAL_INFO_KIND, &info) != kal_ok || info.kind != kal_node_file) continue;
+        if (f(name, n, info.size)) bytes += info.size;
+    }
+    return bytes;
+}
+
+}  // namespace
+
+extern "C" unsigned long long okrun_cache_list(void (*each)(const char*, unsigned long long, int, void*), void* ctx) {
+    owned_dir dir;
+    if (!cache_directory(dir)) return 0;
+    const bool current = this_boot(dir.d);
+    return each_file(dir.d, [&](const char* name, kal_uintptr, kal_u64 size) {
+        if (each) each(name, size, current ? 1 : 0, ctx);
+        return true;
+    });
+}
+
+extern "C" unsigned long long okrun_cache_reclaim(int all) {
+    unsigned long long bytes = 0;
+    owned_dir dir;
+    if (cache_directory(dir)) {
+        const bool current = this_boot(dir.d);
+        bytes += each_file(dir.d, [&](const char* name, kal_uintptr n, kal_u64) {
+            if (!(all || (!current && prepared_name(name, n)))) return false;
+            return kal_fs_remove(dir.d, name, n) == kal_ok;
+        });
+    }
+    if (all) {
+        static const char* const admitted[] = { "okrun", "admitted" };
+        static const char* const digests[] = { "okrun", "digests" };
+        static const char* const expanded[] = { "okrun", "expanded" };
+        const char* const* const kept[] = { admitted, digests, expanded };
+        for (const char* const* below : kept) {
+            owned_dir d;
+            if (!user_cache(below, 2, d.d, &d.own)) continue;
+            bytes += each_file(d.d, [&](const char* name, kal_uintptr n, kal_u64) {
+                return kal_fs_remove(d.d, name, n) == kal_ok;
+            });
+        }
+    }
+    return bytes;
 }
 
 // --- libraries ------------------------------------------------------------------

@@ -320,7 +320,7 @@ namespace {
 bool admit_layout(okld_u64 archive_size, const okld_zip_member* m, char (&name)[256], okld_why* why) {
     const size n = m->name_len < sizeof name - 1 ? m->name_len : sizeof name - 1;
     copy(name, m->name, n); name[n] = 0;
-    if (m->method != 0 || m->size != m->original) { say(why, name, ": not stored; an okb member is stored as it is (docs/okb.md)"); return false; }
+    if (m->method != 0 || m->size != m->original) { say(why, name, ": not stored; it is expanded before it is admitted (docs/okb.md)"); return false; }
     if (m->data > archive_size || m->size > archive_size - m->data) { say(why, name, ": its bytes extend beyond the archive"); return false; }
     if (okld_okb_is_image(name, n) && m->data % OKLD_OKB_ALIGNMENT != 0) {
         say(why, name, ": its bytes do not begin at a multiple of 64 KiB (docs/okb.md)");
@@ -346,6 +346,31 @@ extern "C" int okld_okb_admit(const void* archive, okld_u64 archive_size, const 
         return 0;
     }
     if (okld_crc32(0, bytes, m->size) != m->crc32) { say(why, name, ": its content does not match its CRC-32"); return -1; }
+    return 0;
+}
+
+extern "C" int okld_okb_expand(const void* archive, okld_u64 archive_size, const okld_zip_member* m,
+                               const void* json, okld_size json_n, void* out, okld_u64 cap, okld_why* why) {
+    char name[256];
+    const size n = m->name_len < sizeof name - 1 ? m->name_len : sizeof name - 1;
+    copy(name, m->name, n); name[n] = 0;
+    if (m->method != 8) { say(why, name, ": not compressed (DEFLATE, method 8)"); return -1; }
+    if (m->data > archive_size || m->size > archive_size - m->data) { say(why, name, ": its bytes extend beyond the archive"); return -1; }
+    if (cap < m->original) { say(why, name, ": the room given is smaller than the member"); return -1; }
+    int whole = 0;
+    const u64 got = okld_inflate(static_cast<const u8*>(archive) + m->data, m->size, out, m->original, &whole);
+    if (!whole || got != m->original) { say(why, name, ": its compressed bytes do not expand to its size"); return -1; }
+    if (json) {
+        u8 want[32], have[32];
+        const int found = okld_okb_digest(json, json_n, name, want);
+        if (found < 0) { say(why, "okb.json cannot be read"); return -1; }
+        if (found == 0) { say(why, name, ": okb.json states no digest for it"); return -1; }
+        okld_sha256(out, m->original, have);
+        for (int i = 0; i < 32; ++i)
+            if (want[i] != have[i]) { say(why, name, ": its content is not the one okb.json states (sha256)"); return -1; }
+        return 0;
+    }
+    if (okld_crc32(0, out, m->original) != m->crc32) { say(why, name, ": its content does not match its CRC-32"); return -1; }
     return 0;
 }
 

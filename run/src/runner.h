@@ -34,6 +34,9 @@ bool profile_touches();   // `touch': this runner records them (0.4)
 // admitted, loaded, a snapshot mapped, initialised, main returned --- with the
 // time and the page faults so far.
 void profile_phase(const char* name);
+// What the runner chose at a point a resource is spent (0.4): the placement's
+// data, the snapshot, what is read ahead.
+void profile_note(const char* point, const char* outcome, kal_u64 bytes);
 // What a measurement takes once the image is loaded and before it runs: the
 // samples begun, the touches of its executable parts begun (`okld_iterate').
 void profile_begin_run();

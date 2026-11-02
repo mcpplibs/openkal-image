@@ -11,6 +11,11 @@ repo        = "https://github.com/mcpplibs/openkal-image"
 openkal-run = { path = "../run" }
 openkal-ld  = { path = "../ld" }
 
+# The compressor of `okld bundle --compress' (0.4): zlib's DEFLATE. The runner
+# expands with libokld's own (freestanding) reader.
+[dependencies.compat]
+zlib = "1.3.2"
+
 [targets.okrun]
 kind = "bin"
 main = "src/okrun.cpp"
