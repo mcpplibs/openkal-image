@@ -2,3 +2,4 @@ target/
 compile_commands.json
 mcpp.lock
 examples/bind/mathlib/lib/
+__pycache__/

@@ -37,14 +37,21 @@ The runner making a snapshot loads the image at the base and binds its imports t
 | --- | --- |
 | `kal_alloc`, `kal_free`, `kal_region_*` | memory of the arena; nothing is given back |
 | `kal_memory_granularity`, `kal_exec_granularity`, every `*_props` without an argument, `kal_version`, `kal_interfaces`, `kal_time_monotonic_granularity`, `kal_timeout_granularity`, `kal_fs_max_name`, `kal_env_system` | the implementation's own answer: a fact |
+| `kal_task_parallelism`, `kal_task_cores`, `kal_env_resources` | the answer this start gives, recorded: the start's own, and the same at most starts |
+| `kal_env_var` | the program's own value of the name, recorded |
 | `kal_task_current` | one fixed word, the context the initialisers run on |
 | `kal_task_yield` | nothing to yield to |
 | `kal_prof_active` | zero |
 | every other name | refused: the runner ends without a snapshot, and the marker names the call |
 
-The facts are what the implementation states of itself. They are folded into one word, which
-the copy records and a start compares with its own: a snapshot made under another
-implementation, another version of it or another machine's granularity is not used.
+The facts are what the implementation states of itself. They are folded into one word with
+the recorded answers --- which of them the initialisers asked for is stated beside it --- and a
+start compares the word with its own: a snapshot made under another implementation, another
+version of it, another machine's granularity, or for a program confined to other processors,
+is not used. A named value an initialiser asked for is recorded by name with a word of its
+value (absent is a value), in the runner's bytes kept with the copy, and a start that answers
+any of them otherwise does not use the snapshot: a library's switch read once into a constant
+(LLVM reads `LLVM_OVERRIDE_PRODUCER` so) holds what this start would have read.
 
 **The arena** lies beside a boundary of 256 MiB after the image's span. A region, and any memory
 aligned to 64 KiB or more, is placed at or above the boundary, aligned from the address itself
@@ -70,11 +77,13 @@ void __okrun_snapshot_start(void);
 ```
 
 **Phase 1.** The runner sets `phase` to 1 before the initialisers run. The C library brings up
-its memory and nothing else: no named value, no stream, no randomness, no clock. A named value
-read while the phase lasts (`getenv`) is asked of the start, which is refused. After the
-initialisers the runner calls `__okrun_snapshot_start`, and the C library reports, by the same
-means, what they did that a snapshot cannot hold --- a named value set by one, which the start's
-own would replace.
+its memory and nothing else: no set of named values, no stream, no randomness, no clock. A named
+value read while the phase lasts (`getenv`) is asked of the environment for that one name and
+kept, so that a second reading answers the same storage; what an initialiser keeps of it is the
+snapshot's memory, and holds the value a start that uses the snapshot has. After the
+initialisers the runner calls `__okrun_snapshot_start`, and the C library reports what they did
+that a snapshot cannot hold by asking for what the start supplies, which is refused: a named
+value set by one is such a thing, since the start's whole set would replace it.
 
 **Phase 2.** A start from the snapshot writes the record (`phase` 2, the arena, the context) and
 calls `__okrun_snapshot_start` before the image's entry. The C library makes the snapshot's
@@ -87,9 +96,10 @@ openkal-musl 0.27.0 takes part (`port/src/okm_start.c`).
 
 ## The copy
 
-The note's descriptor (`okld_prepared_info`) states the base, the image's digest, the facts, the
-arena and its size, the context word, and the offsets from the base of `__okrun_snapshot_start`
-and of `__okrun_snapshot`. Its blocks are the 64 KiB blocks of the image's writable segments and
+The note's descriptor (`okld_prepared_info`) states the base, the image's digest, the facts and
+the answers they fold in, the arena and its size, the context word, the offsets from the base of
+`__okrun_snapshot_start` and of `__okrun_snapshot`, and where the runner's own bytes --- the named
+values asked for --- lie in the file. Its blocks are the 64 KiB blocks of the image's writable segments and
 of the arena that hold anything but zeros, joined where at most two blocks of zeros lie between,
 at file offsets congruent to their addresses modulo 65536; a block lies within one segment or
 within the arena.
@@ -123,5 +133,8 @@ often such addresses, so they are not examined.
   not take effect; `OKRUN_SNAPSHOT=0` runs the initialisers at the start.
 - A program whose initialisers read the named values other than through `getenv` (`environ`
   itself) reads them empty while the snapshot is made, and no refusal reports it.
+- The data, and the memory of the snapshot, are read from its file as the program touches them,
+  and are not read ahead: a start touches little of what its initialisers made (clangd's
+  `--version`: 311 page faults from the snapshot, 442 without it, and 15 % less processor time).
 - The allocator's per-heap secrets are drawn once a boot, when the snapshot is made, not once a
   start.
