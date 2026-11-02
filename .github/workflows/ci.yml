@@ -326,7 +326,9 @@ jobs:
           grep -q '^made' "$OKRUN_CACHE"/*.sealing || { echo "::error::no snapshot was made"; exit 1; }
           grep -q 'refused: an initialiser asked for kal_time_monotonic' "$OKRUN_CACHE"/*.sealing \
             || { echo "::error::the initialiser that asked for the time was not refused"; exit 1; }
-          out=$(run snapshot); echo "$out"
+          rm -rf snapprof && mkdir snapprof
+          out=$(OKRUN_PROF=phases:snapprof run snapshot); echo "$out"
+          cat snapprof/*.json | tr -d '\r' | sed -n '/"runner"/,/]/p'
           expect "$out" 'started from the snapshot' 'the second start did not start from the snapshot'
           expect "$out" 'the memory is filled' 'the snapshot holds other memory'
           out=$(OKIMG_SNAPSHOT_NAME=set run snapshot)

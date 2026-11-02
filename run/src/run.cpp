@@ -1136,11 +1136,15 @@ constexpr char kSnapshotStart[] = "__okrun_snapshot_start";
 // The snapshot of this boot's base, mapped into `s.prepared', when one was made
 // under this implementation's facts.
 bool snapshot_found(search& s, const local_place& lp, okld_prepared_info& info) {
-    auto made_here = [](const okld_prepared_info& i, const local_place&) {
-        return (i.flags & OKLD_PREPARED_SNAPSHOT) != 0 && i.facts == environment_facts(i.asked) && i.start != 0
-            && i.state != 0;
+    auto a_snapshot = [](const okld_prepared_info& i, const local_place&) {
+        return (i.flags & OKLD_PREPARED_SNAPSHOT) != 0 && i.start != 0 && i.state != 0;
     };
-    if (!map_prepared(lp, ".oksnap", s.prepared, info, made_here)) return false;
+    if (!map_prepared(lp, ".oksnap", s.prepared, info, a_snapshot)) return false;
+    if (info.facts != environment_facts(info.asked)) {
+        release_file(s.prepared);
+        profile_note("snapshot", "declined: the implementation's facts, or this start's answers, differ", 0);
+        return false;
+    }
     if (info.kept_size && !seal_kept_holds(s.prepared.data + info.kept, info.kept_size)) {
         release_file(s.prepared);
         profile_note("snapshot", "declined: a named value the initialisers read differs", 0);
@@ -1557,7 +1561,13 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     if (local && snapshot == snapshotting::use && snapshot_found(s, lp, snap)) {
         loaded = okld_load_prepared(bytes, size, name, &s.host, s.prepared.data, s.prepared.size, &m, &reason);
         if (loaded == 0) from_snapshot = true;
-        else { release_file(s.prepared); reason = okld_why{}; }
+        else {
+            static char why_not[sizeof reason.text + 32];
+            text(why_not, sizeof why_not) << "not loaded: " << reason.text;
+            profile_note("snapshot", why_not, 0);
+            release_file(s.prepared);
+            reason = okld_why{};
+        }
     }
     if (loaded != 0 && local && prepare_local(s, bytes, size, lp)) {
         loaded = okld_load_prepared(bytes, size, name, &s.host, s.prepared.data, s.prepared.size, &m, &reason);
