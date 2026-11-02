@@ -27,7 +27,7 @@ openkal-windows = "0.19.0"
 # openkal.space is provided its names are bound, and elsewhere an image that
 # requires it is refused at load, naming it.
 [build]
-sources = ["src/okrun.cppm", "src/run.cpp", "src/bindings.cpp", "src/prof.cpp"]
+sources = ["src/okrun.cppm", "src/run.cpp", "src/bindings.cpp", "src/seal.cpp", "src/prof.cpp"]
 include_dirs = ["include"]
 flags = [
   { glob = "src/*.cpp", cxxflags = ["-fno-exceptions", "-fno-rtti"] },

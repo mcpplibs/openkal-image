@@ -26,4 +26,7 @@ const binding* space_bindings(unsigned long& count) {
     return g_space;
 }
 
+kal_uintptr space_props() { return kal_space_props(); }
+void* space_props_binding() { return reinterpret_cast<void*>(&present<&::kal_space_props>::call); }
+
 }  // namespace okrun

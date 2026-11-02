@@ -102,9 +102,7 @@ OKRUN_IMAGE_ABI kal_intptr own_kal_env_loader(char* out, kal_uintptr cap) {
 // are answered here, and the word of interfaces states them beside the
 // implementation's. The program's end is where a measurement writes what it
 // measured, so `kal_exit' and `kal_abort' pass through here first.
-OKRUN_IMAGE_ABI kal_u64 own_kal_interfaces(void) {
-    return kal_interfaces() | KAL_IFACE_PROF | KAL_IFACE_DEBUG;
-}
+OKRUN_IMAGE_ABI kal_u64 own_kal_interfaces(void) { return own_interfaces(); }
 OKRUN_IMAGE_ABI void own_kal_exit(int status) {
     profile_phase("exit");
     profile_finish();
@@ -179,6 +177,8 @@ const binding g_counted[] = {
 static_assert(sizeof g_table / sizeof g_table[0] <= kProfiledNames, "the call counts hold every name");
 
 }  // namespace
+
+kal_u64 own_interfaces() { return kal_interfaces() | KAL_IFACE_PROF | KAL_IFACE_DEBUG; }
 
 const binding* bindings(unsigned long& count) {
     count = sizeof g_table / sizeof g_table[0];

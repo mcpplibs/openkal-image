@@ -812,6 +812,7 @@ bool boot_slide(kal_dir dir, unsigned long long& slide) {
             if (kal_fs_list_next(dir, &iter, name, sizeof name, &n, &kind) != kal_ok || iter == 0) break;
             if (n > 6 && n < sizeof name && same_bytes(name + n - 6, ".okseg", 6)) kal_fs_remove(dir, name, n);
             if (n > 7 && n < sizeof name && same_bytes(name + n - 7, ".oksnap", 7)) kal_fs_remove(dir, name, n);
+            if (n > 8 && n < sizeof name && same_bytes(name + n - 8, ".sealing", 8)) kal_fs_remove(dir, name, n);
         }
     }
     char line[96];
@@ -879,62 +880,459 @@ bool image_digest(search& s, const void* bytes, unsigned long long size, unsigne
     return true;
 }
 
-// The prepared copy of the entry image for this boot's base, found or made,
-// mapped into `s.prepared'. False leaves the image to its sealed base.
-bool prepare_local(search& s, const void* bytes, unsigned long long size) {
+// WHERE AN IMAGE IS PLACED ON THIS MACHINE AT THIS BOOT, and the names of what
+// is prepared for it there: `<stem>.okseg' (its data for the base),
+// `<stem>.oksnap' (its snapshot) and `<stem>.sealing' (a snapshot was asked
+// for), the stem being the image's digest and the base.
+struct local_place {
+    owned_dir          dir;
+    unsigned long long base = 0;
+    unsigned char      digest[32] = {};
+    char               stem[64] = {};
+};
+
+bool local_place_of(search& s, const void* bytes, unsigned long long size, local_place& lp) {
     if (placement_policy() != policy::local || !s.host.reserve_at) return false;
     okld_u64 sealed = 0; okld_u32 count = 0;
     if (okld_placement(bytes, size, &sealed, &count) != 1 || count == 0) return false;
-    unsigned char digest[32];
-    if (!image_digest(s, bytes, size, digest)) return false;
-    owned_dir dir;
-    if (!cache_directory(dir)) return false;
+    if (!image_digest(s, bytes, size, lp.digest)) return false;
+    if (!cache_directory(lp.dir)) return false;
     unsigned long long slide = 0;
-    if (!boot_slide(dir.d, slide)) return false;
+    if (!boot_slide(lp.dir.d, slide)) return false;
     // From the digest's own base, as okld_place_base chooses one, moved by the
     // slide within [16 TiB, 32 TiB - 4 GiB): room for a span of 4 GiB above.
-    const unsigned long long slot = (static_cast<unsigned long long>(digest[0]) | static_cast<unsigned long long>(digest[1]) << 8) & 0xfff;
+    const unsigned long long slot = (static_cast<unsigned long long>(lp.digest[0]) | static_cast<unsigned long long>(lp.digest[1]) << 8) & 0xfff;
     const unsigned long long range = (1ull << 44) - (1ull << 32);
-    const unsigned long long base = (1ull << 44) + (slot * (1ull << 32) + slide) % range;
+    lp.base = (1ull << 44) + (slot * (1ull << 32) + slide) % range;
+    char h[33], b[17];
+    to_hex(lp.digest, 16, h);
+    char* o = b;
+    for (int sh = 60; sh >= 0; sh -= 4) *o++ = hex_digits[(lp.base >> sh) & 15];
+    *o = 0;
+    text(lp.stem, sizeof lp.stem) << h << "-" << b;
+    return true;
+}
+
+void place_name(const local_place& lp, const char* suffix, char (&out)[96]) { text(out, sizeof out) << lp.stem << suffix; }
+
+// A prepared file of the place, mapped, its note read and held to `accept'.
+bool map_prepared(const local_place& lp, const char* suffix, file_bytes& out, okld_prepared_info& info,
+                  bool (*accept)(const okld_prepared_info&, const local_place&)) {
     char name[96];
-    {
-        char h[33], b[17];
-        to_hex(digest, 16, h);
-        char* o = b;
-        for (int sh = 60; sh >= 0; sh -= 4) *o++ = hex_digits[(base >> sh) & 15];
-        *o = 0;
-        text(name, sizeof name) << h << "-" << b << ".okseg";
+    place_name(lp, suffix, name);
+    kal_file f{};
+    if (kal_fs_open(lp.dir.d, name, length(name), KAL_OPEN_READ, &f) != kal_ok) return false;
+    file_bytes fb;
+    if (!map_all(f, fb)) { kal_fs_close_file(f); return false; }
+    okld_prepared_block none[1];
+    if (okld_prepared(fb.data, fb.size, &info, none, 0) != 0 || info.base != lp.base
+        || !same_bytes(info.digest, lp.digest, 32) || !accept(info, lp)) {
+        release_file(fb);
+        return false;
     }
-    auto found = [&]() -> bool {
-        kal_file f{};
-        if (kal_fs_open(dir.d, name, length(name), KAL_OPEN_READ, &f) != kal_ok) return false;
-        file_bytes fb;
-        if (!map_all(f, fb)) { kal_fs_close_file(f); return false; }
-        okld_prepared_info info{};
-        okld_prepared_block blocks[1];
-        if (okld_prepared(fb.data, fb.size, &info, blocks, 0) != 0 || info.base != base || info.flags != 0
-            || !same_bytes(info.digest, digest, 32)) {
-            release_file(fb);
-            return false;
-        }
-        s.prepared = fb;
-        return true;
-    };
-    if (found()) return true;
+    out = fb;
+    return true;
+}
+
+// The prepared copy of the entry image for this boot's base, found or made,
+// mapped into `s.prepared'. False leaves the image to its sealed base.
+bool prepare_local(search& s, const void* bytes, unsigned long long size, const local_place& lp) {
+    okld_prepared_info info{};
+    auto plain = [](const okld_prepared_info& i, const local_place&) { return i.flags == 0; };
+    if (map_prepared(lp, ".okseg", s.prepared, info, plain)) return true;
     okld_why why{};
-    const okld_u64 need = okld_prepare(bytes, size, base, digest, nullptr, 0, &why);
+    const okld_u64 need = okld_prepare(bytes, size, lp.base, lp.digest, nullptr, 0, &why);
     if (need == 0) return false;
     void* buffer = kal_alloc(need, 16);
     if (!buffer) return false;
-    const bool made = okld_prepare(bytes, size, base, digest, buffer, need, &why) == need
-                   && write_whole(dir.d, name, buffer, need);
+    char name[96];
+    place_name(lp, ".okseg", name);
+    const bool made = okld_prepare(bytes, size, lp.base, lp.digest, buffer, need, &why) == need
+                   && write_whole(lp.dir.d, name, buffer, need);
     kal_free(buffer, need, 16);
-    return made && found();
+    return made && map_prepared(lp, ".okseg", s.prepared, info, plain);
+}
+
+// --- a snapshot of the image's initialisers (0.4, docs/snapshot.md) -----------------
+//
+// THE INITIALISERS RUN ONCE IN A BOOT, NOT AT EVERY START. A runner that finds no
+// snapshot of the image for this boot's base starts the program again to make
+// one (`start_making'), and goes on to start the image as it would have; the
+// runner it started runs the image's initialisers alone --- with memory, and
+// with nothing of the start's own (src/seal.cpp) --- and writes the image's
+// data and the memory they obtained as a prepared copy, `<stem>.oksnap'. A
+// later start maps it, its imports bound again for this process, and enters
+// the image's C library to take what the start supplies --- its arguments, its
+// named values, its streams --- before its entry. An image whose C library does
+// not take part (its `__okrun_snapshot' record), one that needs another image,
+// and one whose initialisers ask for anything of the start's own, are not made
+// a snapshot of; the marker `<stem>.sealing' records why, and the attempt is not
+// repeated in the boot.
+//
+//   OKRUN_SNAPSHOT=0      no snapshot is used or made
+//
+// and, between runners, `start' (start the runner that makes it, and end) and
+// `make' (make it).
+enum class snapshotting { use, off, start, make };
+
+snapshotting snapshot_mode() {
+    char v[8];
+    const kal_intptr n = kal_env_var("OKRUN_SNAPSHOT", 14, v, sizeof v);
+    if (n == 1 && v[0] == '0') return snapshotting::off;
+    if (n == 5 && same_bytes(v, "start", 5)) return snapshotting::start;
+    if (n == 4 && same_bytes(v, "make", 4)) return snapshotting::make;
+    return snapshotting::use;
+}
+
+// The record an image's C library exports for the runner, and the entry of its
+// second phase (docs/snapshot.md).
+struct snapshot_record {
+    kal_u64 arena;     // the arena's address
+    kal_u64 size;      // its bytes
+    kal_u32 phase;     // 1: the initialisers run for a snapshot; 2: a start from one
+    kal_u32 reserved;
+    kal_u64 context;   // the word of the context the initialisers ran on
+};
+constexpr char kSnapshotRecord[] = "__okrun_snapshot";
+constexpr char kSnapshotStart[] = "__okrun_snapshot_start";
+
+// The snapshot of this boot's base, mapped into `s.prepared', when one was made
+// under this implementation's facts.
+bool snapshot_found(search& s, const local_place& lp, okld_prepared_info& info) {
+    auto made_here = [](const okld_prepared_info& i, const local_place&) {
+        return (i.flags & OKLD_PREPARED_SNAPSHOT) != 0 && i.facts == environment_facts(i.asked) && i.start != 0
+            && i.state != 0;
+    };
+    if (!map_prepared(lp, ".oksnap", s.prepared, info, made_here)) return false;
+    if (info.kept_size && !seal_kept_holds(s.prepared.data + info.kept, info.kept_size)) {
+        release_file(s.prepared);
+        return false;
+    }
+    return true;
+}
+
+// This program started again, as it was started --- its own image, its
+// arguments, its named values --- with OKRUN_SNAPSHOT set to `value' and the
+// null device for its streams, where the implementation gives one.
+bool start_again(const char* value, kal_process& out) {
+    char self[1024];
+    const kal_intptr sn = kal_env_image(self, sizeof self - 1);
+    if (sn <= 0 || sn >= static_cast<kal_intptr>(sizeof self)) return false;
+    self[sn] = 0;
+    kal_dir at{}; const char* rest = nullptr;
+    kal_dir work{}; char wn[8]; kal_uintptr wl = 0;
+    if (!locate(self, at, rest) || kal_fs_preopen(0, &work, wn, sizeof wn, &wl) != kal_ok) return false;
+    // The arguments and the named values, in one buffer.
+    constexpr unsigned kMost = 256;
+    static char store[65536];
+    static const char* argv[kMost];
+    static kal_uintptr argl[kMost];
+    static const char* envp[kMost + 1];
+    static kal_uintptr envl[kMost + 1];
+    unsigned long used = 0;
+    auto keep = [&](kal_intptr n, auto fill) -> const char* {
+        if (n < 0 || used + static_cast<unsigned long>(n) + 1 > sizeof store) return nullptr;
+        char* p = store + used;
+        if (fill(p, static_cast<kal_uintptr>(n)) != n) return nullptr;
+        p[n] = 0;
+        used += static_cast<unsigned long>(n) + 1;
+        return p;
+    };
+    const kal_uintptr argc = kal_env_arg_count();
+    if (argc == 0 || argc > kMost) return false;
+    for (kal_uintptr i = 0; i < argc; ++i) {
+        const kal_intptr n = kal_env_arg(i, nullptr, 0);
+        argv[i] = keep(n, [&](char* p, kal_uintptr c) { return kal_env_arg(i, p, c); });
+        if (!argv[i]) return false;
+        argl[i] = static_cast<kal_uintptr>(n);
+    }
+    kal_uintptr envc = 0;
+    const kal_uintptr names = kal_env_var_count();
+    for (kal_uintptr i = 0; i < names && envc < kMost; ++i) {
+        char name[256];
+        const kal_intptr nn = kal_env_var_at(i, name, sizeof name - 1);
+        if (nn <= 0 || nn >= static_cast<kal_intptr>(sizeof name)) continue;
+        name[nn] = 0;
+        if (nn == 14 && same_bytes(name, "OKRUN_SNAPSHOT", 14)) continue;
+        const kal_intptr vn = kal_env_var(name, static_cast<kal_uintptr>(nn), nullptr, 0);
+        if (vn < 0 || used + static_cast<unsigned long>(nn + vn) + 2 > sizeof store) continue;
+        char* p = store + used;
+        for (kal_intptr k = 0; k < nn; ++k) p[k] = name[k];
+        p[nn] = '=';
+        if (kal_env_var(name, static_cast<kal_uintptr>(nn), p + nn + 1, static_cast<kal_uintptr>(vn)) != vn) continue;
+        p[nn + 1 + vn] = 0;
+        used += static_cast<unsigned long>(nn + vn) + 2;
+        envp[envc] = p;
+        envl[envc++] = static_cast<kal_uintptr>(nn + vn + 1);
+    }
+    char mine[32];
+    text(mine, sizeof mine) << "OKRUN_SNAPSHOT=" << value;
+    envp[envc] = mine;
+    envl[envc++] = length(mine);
+    const kal_uintptr quiet = (kal_process_props() & KAL_PROCESS_PROP_NULL_STREAMS)
+        ? (KAL_SPAWN_NULL_IN | KAL_SPAWN_NULL_OUT | KAL_SPAWN_NULL_ERR) : 0;
+    const kal_spawn how{ at, work, nullptr, nullptr, 0, quiet };
+    return kal_process_spawn(&how, rest, length(rest), argv, argl, argc, envp, envl, envc, nullptr, &out) == kal_ok;
+}
+
+// ONCE IN A BOOT FOR AN IMAGE: the marker is made exclusively, and only the
+// start that made it starts the runner that makes the snapshot. Not for a
+// program that asked to spend nothing ahead of it (openkal 0.23, economy).
+void start_making(const local_place& lp) {
+    if (kal_env_resources() == KAL_RESOURCES_ECONOMY) return;
+    char name[96];
+    place_name(lp, ".sealing", name);
+    kal_file f{};
+    if (kal_fs_open(lp.dir.d, name, length(name), KAL_OPEN_WRITE | KAL_OPEN_CREATE | KAL_OPEN_EXCLUSIVE, &f) != kal_ok)
+        return;
+    kal_fs_close_file(f);
+    kal_process p{};
+    if (!start_again("start", p)) return;
+    int status = 0, terminated = 0;
+    kal_process_wait(p, &status, &terminated);
+    kal_process_close(p);
 }
 
 using image_function = void (OKRUN_IMAGE_ABI*)(void);
 using image_main = int (OKRUN_IMAGE_ABI*)(void);
 void call_image(void* fn, void*) { reinterpret_cast<image_function>(fn)(); }
+
+// --- the runner that makes a snapshot ------------------------------------------------
+
+constexpr kal_u64 kBlock = 65536;
+
+struct program_header { kal_u32 type, flags; kal_u64 offset, vaddr, paddr, filesz, memsz, align; };
+constexpr kal_u32 kLoad = 1, kWritable = 2;
+
+// The module's loadable segments, as `each(from, to)' of its addresses, the
+// writable ones or all of them.
+struct segments_of { okld_module* m; bool writable_only; void (*each)(kal_u64, kal_u64, void*); void* ctx; };
+void for_segments(okld_module* m, bool writable_only, void (*each)(kal_u64, kal_u64, void*), void* ctx) {
+    segments_of w{ m, writable_only, each, ctx };
+    okld_iterate([](void* base, const void* phdr, okld_u32 phnum, const char*, void* c) -> int {
+        auto& w = *static_cast<segments_of*>(c);
+        if (base != okld_base(w.m)) return 0;
+        const auto* ph = static_cast<const program_header*>(phdr);
+        const auto b = reinterpret_cast<kal_u64>(base);
+        for (okld_u32 i = 0; i < phnum; ++i)
+            if (ph[i].type == kLoad && (!w.writable_only || (ph[i].flags & kWritable)))
+                w.each(b + ph[i].vaddr, b + ph[i].vaddr + ph[i].memsz, w.ctx);
+        return 1;
+    }, &w);
+}
+
+// What the runner making a snapshot reports when it ends without one: the
+// marker of the place says why.
+local_place* g_making = nullptr;
+
+// A RUN OF BLOCKS: the 64 KiB blocks of a range that hold anything but zeros,
+// joined where at most two blocks of zeros lie between, as a prepared copy's
+// blocks (okld_prepare_blocks); and, where they are more than a copy holds, the
+// two nearest joined until they are not.
+struct block_list {
+    okld_prepared_block b[OKLD_PREPARED_MAX * 4];
+    kal_u32 count = 0;
+    bool overflow = false;
+};
+bool zeros(kal_u64 from, kal_u64 to) {
+    const auto* p = reinterpret_cast<const kal_u64*>(from);
+    for (kal_u64 i = 0; i < (to - from) / 8; ++i) if (p[i]) return false;
+    for (kal_u64 a = from + (to - from) / 8 * 8; a < to; ++a) if (*reinterpret_cast<const unsigned char*>(a)) return false;
+    return true;
+}
+void add_runs(kal_u64 from, kal_u64 to, void* ctx) {
+    auto& l = *static_cast<block_list*>(ctx);
+    kal_u64 run_from = 0, run_to = 0;
+    bool open = false;
+    for (kal_u64 c = from; c < to;) {
+        const kal_u64 e = (c / kBlock + 1) * kBlock < to ? (c / kBlock + 1) * kBlock : to;
+        if (!zeros(c, e)) {
+            if (open && c - run_to <= 2 * kBlock) run_to = e;
+            else {
+                if (open) { if (l.count == sizeof l.b / sizeof l.b[0]) { l.overflow = true; return; } l.b[l.count++] = { run_from, 0, run_to - run_from }; }
+                run_from = c; run_to = e; open = true;
+            }
+        }
+        c = e;
+    }
+    if (open) { if (l.count == sizeof l.b / sizeof l.b[0]) { l.overflow = true; return; } l.b[l.count++] = { run_from, 0, run_to - run_from }; }
+}
+// Runs of one range are joined, never runs of two: a block lies within one
+// segment, or within the arena.
+void fit(block_list& l, kal_u64* range_of) {
+    while (l.count > OKLD_PREPARED_MAX) {
+        kal_u32 best = 0; kal_u64 gap = ~0ull;
+        for (kal_u32 i = 0; i + 1 < l.count; ++i) {
+            if (range_of[i] != range_of[i + 1]) continue;
+            const kal_u64 g = l.b[i + 1].address - (l.b[i].address + l.b[i].size);
+            if (g < gap) { gap = g; best = i; }
+        }
+        if (gap == ~0ull) { l.overflow = true; return; }
+        l.b[best].size = l.b[best + 1].address + l.b[best + 1].size - l.b[best].address;
+        for (kal_u32 i = best + 1; i + 1 < l.count; ++i) { l.b[i] = l.b[i + 1]; range_of[i] = range_of[i + 1]; }
+        --l.count;
+    }
+}
+
+// THE PROOF THAT THE SNAPSHOT HOLDS NOTHING OF THIS PROCESS'S OWN: every word
+// of the image's data and of the arena that is the address of a binding is
+// one a relocation of an import writes (okld_bound_imports), holding what the
+// loader wrote there --- a start writes those words again for itself, and a
+// binding's address kept anywhere else would call this runner's refusal, or
+// nothing, in the process that maps the snapshot. The bindings are this
+// process's only addresses the initialisers are given; an address of the
+// stack they keep is of frames that have returned, as it is at any start, and
+// the bytes a copy carries beyond what it holds --- a short string's unused
+// characters --- are often such addresses, so those are not taken for one.
+struct import_slot { kal_u64 slot, value; const char* name; };
+struct proof {
+    import_slot* slots = nullptr;
+    kal_u32 count = 0, cap = 0;
+    const char* failure = nullptr;
+    char why[256] = {};
+};
+bool is_slot(const proof& p, kal_u64 at) {
+    kal_u32 a = 0, b = p.count;
+    while (a < b) { const kal_u32 k = (a + b) / 2; if (p.slots[k].slot < at) a = k + 1; else b = k; }
+    return a < p.count && p.slots[a].slot == at;
+}
+void hex_of(kal_u64 v, char (&out)[19]) {
+    out[0] = '0'; out[1] = 'x';
+    for (int i = 0; i < 16; ++i) out[2 + i] = hex_digits[(v >> (60 - 4 * i)) & 15];
+    out[18] = 0;
+}
+void prove_range(kal_u64 from, kal_u64 to, void* ctx) {
+    auto& p = *static_cast<proof*>(ctx);
+    if (p.failure) return;
+    for (kal_u64 a = (from + 7) & ~7ull; a + 8 <= to; a += 8) {
+        const kal_u64 w = *reinterpret_cast<const kal_u64*>(a);
+        if (!seal_is_binding(static_cast<kal_uintptr>(w)) || is_slot(p, a)) continue;
+        char at[19], value[19];
+        hex_of(a, at);
+        hex_of(w, value);
+        text(p.why, sizeof p.why) << "an initialiser kept the address of a binding, " << value << ", at " << at;
+        p.failure = p.why;
+        return;
+    }
+}
+
+[[noreturn]] void make_snapshot(search& s, const void* bytes, unsigned long long size, const char* name) {
+    local_place lp;
+    if (!local_place_of(s, bytes, size, lp)) seal_refused("the image is not placed at a base of this boot");
+    g_making = &lp;
+    if (!prepare_local(s, bytes, size, lp)) seal_refused("its data for this boot's base cannot be prepared");
+    s.host.resolve = [](const char* n, void*) { return seal_resolve(n); };
+    s.host.debugger = 0;
+    s.host.prefetch = 0;
+    okld_module* m = nullptr;
+    okld_why reason{};
+    if (okld_load_prepared(bytes, size, name, &s.host, s.prepared.data, s.prepared.size, &m, &reason) != 0)
+        seal_refused(reason.text);
+    release_ran(s);
+    int modules = 0;
+    okld_iterate([](void*, const void*, okld_u32, const char*, void* c) { ++*static_cast<int*>(c); return 0; }, &modules);
+    if (modules != 1) seal_refused("the image needs another, which would start without its own snapshot");
+    auto* record = static_cast<snapshot_record*>(okld_symbol(m, kSnapshotRecord));
+    void* second = okld_symbol(m, kSnapshotStart);
+    if (!record || !second) seal_refused("the image's C library takes no part in a snapshot (__okrun_snapshot)");
+    // The arena, after the span.
+    kal_u64 span_end = 0;
+    for_segments(m, false, [](kal_u64, kal_u64 to, void* c) { auto& e = *static_cast<kal_u64*>(c); if (to > e) e = to; }, &span_end);
+    seal_begin(span_end);
+    *record = snapshot_record{ 0, 0, 1, 0, kSealContext };
+    okld_initialise(m, &call_image, nullptr);
+    // THE SECOND PHASE'S ENTRY, IN THE FIRST: the C library reports what its
+    // initialisers did that a snapshot cannot hold, by asking for what the
+    // start supplies, which is refused.
+    call_image(second, nullptr);
+    kal_u64 arena_at = 0, arena_end = 0;
+    seal_arena(arena_at, arena_end);
+    const kal_u64 used = arena_end - arena_at;
+
+    proof p;
+    okld_bound_imports(m, [](void*, okld_u64, const char*, void* c) { ++static_cast<proof*>(c)->cap; return 0; }, &p);
+    p.slots = p.cap ? static_cast<import_slot*>(kal_alloc(p.cap * sizeof(import_slot), 16)) : nullptr;
+    if (p.cap && !p.slots) seal_refused("no memory for the proof");
+    okld_bound_imports(m, [](void* slot, okld_u64 value, const char* n, void* c) {
+        auto& p = *static_cast<proof*>(c);
+        if (p.count < p.cap) p.slots[p.count++] = { reinterpret_cast<kal_u64>(slot), value, n };
+        return 0;
+    }, &p);
+    for (kal_u32 i = 1; i < p.count; ++i)   // in order of address
+        for (kal_u32 j = i; j > 0 && p.slots[j - 1].slot > p.slots[j].slot; --j) {
+            const import_slot t = p.slots[j]; p.slots[j] = p.slots[j - 1]; p.slots[j - 1] = t;
+        }
+    for (kal_u32 i = 0; i < p.count; ++i)
+        if (*reinterpret_cast<const kal_u64*>(p.slots[i].slot) != p.slots[i].value) {
+            text(p.why, sizeof p.why) << "an initialiser wrote over the binding of " << p.slots[i].name;
+            seal_refused(p.why);
+        }
+    for_segments(m, true, &prove_range, &p);
+    prove_range(arena_at, arena_at + used, &p);
+    if (p.failure) seal_refused(p.failure);
+
+    // The blocks: the image's data and the arena, where they are not zero.
+    static block_list l;
+    static kal_u64 range_of[sizeof l.b / sizeof l.b[0]];
+    struct segment_runs { block_list* l; kal_u64* range_of; kal_u64 range; };
+    segment_runs r{ &l, range_of, 0 };
+    for_segments(m, true, [](kal_u64 from, kal_u64 to, void* c) {
+        auto& r = *static_cast<segment_runs*>(c);
+        const kal_u32 before = r.l->count;
+        add_runs(from, to, r.l);
+        for (kal_u32 i = before; i < r.l->count; ++i) r.range_of[i] = r.range;
+        ++r.range;
+    }, &r);
+    {
+        const kal_u32 before = l.count;
+        add_runs(arena_at, arena_at + used, &l);
+        for (kal_u32 i = before; i < l.count; ++i) range_of[i] = ~0ull;
+    }
+    fit(l, range_of);
+    if (l.overflow) seal_refused("its data and its arena are more blocks than a prepared copy holds");
+
+    okld_prepared_info info{};
+    info.version = 1;
+    info.flags = OKLD_PREPARED_SNAPSHOT;
+    info.base = lp.base;
+    for (int i = 0; i < 32; ++i) info.digest[i] = lp.digest[i];
+    info.count = l.count;
+    info.asked = seal_asked();
+    info.facts = environment_facts(info.asked);
+    info.arena = arena_at;
+    info.arena_size = used;
+    info.context = kSealContext;
+    info.start = reinterpret_cast<kal_u64>(second) - lp.base;
+    info.state = reinterpret_cast<kal_u64>(record) - lp.base;
+    auto live = [](okld_u64 address, okld_u64, void*) -> const void* { return reinterpret_cast<const void*>(address); };
+    static unsigned char kept[65536];
+    const kal_u64 kept_size = seal_kept(kept, sizeof kept);
+    if (kept_size > sizeof kept) seal_refused("the named values asked for are more than a snapshot keeps");
+    const okld_u64 total = okld_prepare_blocks(&info, l.b, live, nullptr, kept, kept_size, nullptr, 0);
+    void* out = total ? kal_alloc(total, 16) : nullptr;
+    if (!out) seal_refused("no memory for the snapshot's file");
+    // The record as a start finds it, before it writes its own phase.
+    *record = snapshot_record{ arena_at, used, 0, 0, kSealContext };
+    char file[96];
+    place_name(lp, ".oksnap", file);
+    if (okld_prepare_blocks(&info, l.b, live, nullptr, kept, kept_size, out, total) != total
+        || !write_whole(lp.dir.d, file, out, total))
+        seal_refused("its file cannot be written");
+    char marker[96];
+    place_name(lp, ".sealing", marker);
+    char line[64];
+    text(line, sizeof line) << "made\n";
+    write_whole(lp.dir.d, marker, line, length(line));
+    kal_exit(0);
+}
+
+// The runner between: it starts the one that makes the snapshot, and ends.
+void start_maker_and_end() {
+    if (snapshot_mode() != snapshotting::start) return;
+    kal_process p{};
+    if (start_again("make", p)) kal_process_close(p);
+    kal_exit(0);
+}
 
 // Loads an admitted image with the search, and enters it. Returns only when
 // it could not be started.
@@ -947,13 +1345,25 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     state().carried = s.options && s.options->carried;
     state().started = true;
     prepare_host(s, true);
+    const snapshotting snapshot = snapshot_mode();
+    if (snapshot == snapshotting::make) make_snapshot(s, bytes, size, name);
     profile_phase("admitted");
     okld_module* m = nullptr;
     okld_why reason{};
-    // AT THIS BOOT'S BASE WHERE THE RUNNER PREPARED IT, at the base it was
-    // sealed with otherwise, and anywhere where neither can be had (0.4).
+    // FROM THE SNAPSHOT OF THIS BOOT'S BASE, where there is one; at that base
+    // where the runner prepared the image's data for it, at the base it was
+    // sealed with otherwise, and anywhere where none can be had (0.4).
     int loaded = -1;
-    if (prepare_local(s, bytes, size)) {
+    bool from_snapshot = false;
+    okld_prepared_info snap{};
+    local_place lp;
+    const bool local = local_place_of(s, bytes, size, lp);
+    if (local && snapshot == snapshotting::use && snapshot_found(s, lp, snap)) {
+        loaded = okld_load_prepared(bytes, size, name, &s.host, s.prepared.data, s.prepared.size, &m, &reason);
+        if (loaded == 0) from_snapshot = true;
+        else { release_file(s.prepared); reason = okld_why{}; }
+    }
+    if (loaded != 0 && local && prepare_local(s, bytes, size, lp)) {
         loaded = okld_load_prepared(bytes, size, name, &s.host, s.prepared.data, s.prepared.size, &m, &reason);
         if (loaded != 0) { release_file(s.prepared); reason = okld_why{}; }
     }
@@ -977,8 +1387,19 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     profile_phase("loaded");
     profile_settle();
     release_ran(s);
+    // An image whose C library takes part, at this boot's base and without a
+    // snapshot, has one made for the starts after this one.
+    if (local && snapshot == snapshotting::use && !from_snapshot && okld_symbol(m, kSnapshotRecord))
+        start_making(lp);
     profile_begin_run();
-    okld_initialise(m, &call_image, nullptr);
+    if (from_snapshot) {
+        // THE SECOND PHASE: the C library takes what this start supplies.
+        auto* base = static_cast<unsigned char*>(okld_base(m));
+        *reinterpret_cast<snapshot_record*>(base + snap.state) = snapshot_record{ snap.arena, snap.arena_size, 2, 0, snap.context };
+        call_image(base + snap.start, nullptr);
+    } else {
+        okld_initialise(m, &call_image, nullptr);
+    }
     profile_phase("initialised");
     const int status = reinterpret_cast<image_main>(entry)();
     profile_phase("main");
@@ -1066,6 +1487,17 @@ search g_search;
 
 image_state& state() { return g_state; }
 
+// The runner making a snapshot ends without one, and its place's marker says why.
+void seal_refused(const char* what) {
+    if (g_making) {
+        char marker[96], line[512];
+        place_name(*g_making, ".sealing", marker);
+        text(line, sizeof line) << "refused: " << what << "\n";
+        write_whole(g_making->dir.d, marker, line, length(line));
+    }
+    kal_exit(3);
+}
+
 bool locate_path(const char* path, kal_dir& dir, const char*& rest) { return locate(path, dir, rest); }
 
 }  // namespace okrun
@@ -1107,6 +1539,7 @@ extern "C" void* okrun_resolve(const char* name) {
 extern "C" int okrun_run_bytes(const void* bytes, unsigned long long size, const char* name,
                                int argc, const char* const* argv, const okrun_options* options,
                                char* why, unsigned long long cap) {
+    start_maker_and_end();
     search& s = g_search;
     s.options = options;
     if (options && options->carried) program_directory(s.directory, sizeof s.directory);
@@ -1121,6 +1554,7 @@ extern "C" int okrun_run_bytes(const void* bytes, unsigned long long size, const
 
 extern "C" int okrun_run_file(const char* path, int argc, const char* const* argv,
                               const okrun_options* options, char* why, unsigned long long cap) {
+    start_maker_and_end();
     file_bytes f;
     if (!read_all(path, f, why, cap)) return -1;
     g_search.ran = f;
@@ -1133,6 +1567,7 @@ extern "C" int okrun_run_file(const char* path, int argc, const char* const* arg
 extern "C" int okrun_run_okb_bytes(const void* bytes, unsigned long long size, const char* entry,
                                    int argc, const char* const* argv, const okrun_options* options,
                                    char* why, unsigned long long cap) {
+    start_maker_and_end();
     search& s = g_search;
     s.options = options;
     if (!is_archive(bytes, size)) { text(why, cap) << "the bytes are not an archive of images (docs/okb.md)"; return -1; }
@@ -1147,6 +1582,7 @@ extern "C" int okrun_run_okb_bytes(const void* bytes, unsigned long long size, c
 extern "C" int okrun_run_images(const okrun_image* images, unsigned long count, const char* entry,
                                 int argc, const char* const* argv, const okrun_options* options,
                                 char* why, unsigned long long cap) {
+    start_maker_and_end();
     search& s = g_search;
     s.options = options;
     s.images = images;

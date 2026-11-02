@@ -79,6 +79,10 @@ jobs:
             # this one is also left unplaced, its placement note empty.
             bash examples/build-image.sh "$arch" "out/$arch/placed.oke" examples/placed/app.c
             PLACE=0 bash examples/build-image.sh "$arch" "out/$arch/unplaced.oke" examples/placed/app.c
+            # A SNAPSHOT OF THE INITIALISERS (0.4.0): an image whose C library
+            # takes part, and one whose initialiser asks for the time.
+            bash examples/build-image.sh "$arch" "out/$arch/snapshot.oke" examples/snapshot/app.c
+            bash examples/build-image.sh "$arch" "out/$arch/snapshot-timed.oke" examples/snapshot/timed.c
             "$OKLD" inspect "out/$arch/placed.oke" | awk '$1 == "placement" { sub(",", "", $2); print $2 }' > "out/$arch/placed.base"
             grep -q '^0x' "out/$arch/placed.base" || { echo "::error::okld place stated no base"; exit 1; }
             "$OKLD" inspect "out/$arch/unplaced.oke" | grep -q '^placement *none' \
@@ -241,23 +245,68 @@ jobs:
       - name: At its base (0.4.0)
         run: |
           # Placed where the implementation places memory where it is asked
-          # (KAL_EXEC_PROP_PLACE): at the base `okld place' chose, its relative
-          # relocations already in its bytes. Anywhere (OKRUN_PLACE=0), and an
-          # image left unplaced: relocated. What the image prints is the same.
+          # (KAL_EXEC_PROP_PLACE): at this boot's base for the image, its data
+          # prepared once for that base in the runner's cache; at the base
+          # `okld place' chose (OKRUN_PLACE=sealed), its relative relocations
+          # already in its bytes. Anywhere (OKRUN_PLACE=0), and an image left
+          # unplaced: relocated. What the image prints is the same.
           a='${{ matrix.arch }}'
           base=$(cat "out/$a/placed.base")
-          "$OKRUN" "out/$a/placed.oke" | tr -d '\r' > placed.txt
+          export OKRUN_CACHE="$RUNNER_TEMP/okplaced"
+          mkdir -p "$OKRUN_CACHE"
+          "$OKRUN" "out/$a/placed.oke" | tr -d '\r' > local.txt
+          "$OKRUN" "out/$a/placed.oke" | tr -d '\r' > again.txt
+          OKRUN_PLACE=sealed "$OKRUN" "out/$a/placed.oke" | tr -d '\r' > placed.txt
           OKRUN_PLACE=0 "$OKRUN" "out/$a/placed.oke" | tr -d '\r' > anywhere.txt
           "$OKRUN" "out/$a/unplaced.oke" | tr -d '\r' > unplaced.txt
-          cat placed.txt anywhere.txt unplaced.txt
+          cat local.txt placed.txt anywhere.txt unplaced.txt
+          ls "$OKRUN_CACHE"
           grep -qx "base $base" placed.txt || { echo "::error::the image was not placed at the base it states ($base)"; exit 1; }
           if grep -qx "base $base" anywhere.txt; then echo "::error::OKRUN_PLACE=0 placed the image at its base"; exit 1; fi
-          for f in placed anywhere unplaced; do grep -v '^base ' "$f.txt" > "$f.out"; done
-          cmp placed.out anywhere.out && cmp placed.out unplaced.out || { echo "::error::an image at its base observes other memory"; exit 1; }
+          local=$(sed -n 's/^base //p' local.txt)
+          b=$((local))
+          (( b % 65536 == 0 && b >= (1 << 44) && b < (1 << 45) )) \
+            || { echo "::error::this boot's base $local is not one the runner chooses"; exit 1; }
+          grep -qx "base $local" again.txt || { echo "::error::a second start of the boot chose another base"; exit 1; }
+          ls "$OKRUN_CACHE"/*.okseg > /dev/null || { echo "::error::no data was prepared for this boot's base"; exit 1; }
+          for f in local placed anywhere unplaced; do grep -v '^base ' "$f.txt" > "$f.out"; done
+          cmp local.out placed.out && cmp placed.out anywhere.out && cmp placed.out unplaced.out \
+            || { echo "::error::an image at its base observes other memory"; exit 1; }
           for want in "the table holds its text" "the entry is the implementation's" "written two one"; do
             grep -q "placed: $want" placed.out || { echo "::error::at its base: $want"; exit 1; }
           done
           echo "  ok  an image at its base, anywhere, and unplaced observes the same memory"
+      - name: A snapshot of the initialisers (0.4.0)
+        run: |
+          # The first start runs the initialiser and has a snapshot made beside
+          # it; the next starts from it. A named value the initialiser read,
+          # set otherwise, and OKRUN_SNAPSHOT=0 start by the initialiser again;
+          # an initialiser that asks for the time is refused a snapshot, and the
+          # marker says so.
+          a='${{ matrix.arch }}'
+          export OKRUN_CACHE="$RUNNER_TEMP/okcache"
+          mkdir -p "$OKRUN_CACHE"
+          run() { "$OKRUN" "out/$a/$1.oke" | tr -d '\r'; }
+          expect() { grep -q "$2" <<<"$1" || { echo "::error::$3"; echo "$1"; exit 1; }; }
+          out=$(run snapshot); expect "$out" 'started by its initialisers' 'the first start ran no initialiser'
+          run snapshot-timed > /dev/null
+          for i in $(seq 100); do
+            n=$(cat "$OKRUN_CACHE"/*.sealing 2>/dev/null | grep -c '^made\|^refused' || true)
+            [ "$n" -ge 2 ] && break; sleep 0.1
+          done
+          cat "$OKRUN_CACHE"/*.sealing
+          grep -q '^made' "$OKRUN_CACHE"/*.sealing || { echo "::error::no snapshot was made"; exit 1; }
+          grep -q 'refused: an initialiser asked for kal_time_monotonic' "$OKRUN_CACHE"/*.sealing \
+            || { echo "::error::the initialiser that asked for the time was not refused"; exit 1; }
+          out=$(run snapshot); echo "$out"
+          expect "$out" 'started from the snapshot' 'the second start did not start from the snapshot'
+          expect "$out" 'the memory is filled' 'the snapshot holds other memory'
+          out=$(OKIMG_SNAPSHOT_NAME=set run snapshot)
+          expect "$out" 'started by its initialisers' 'a start whose named value differs used the snapshot'
+          expect "$out" 'the name is set' 'the initialiser read another value'
+          out=$(OKRUN_SNAPSHOT=0 run snapshot); expect "$out" 'started by its initialisers' 'OKRUN_SNAPSHOT=0 used the snapshot'
+          out=$(run snapshot-timed); expect "$out" 'started by its initialisers' 'an image refused a snapshot started from one'
+          echo "  ok  a snapshot is made once, used, compared, declined and refused"
       - name: The refusals
         run: |
           a='${{ matrix.arch }}'

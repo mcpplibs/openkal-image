@@ -287,36 +287,40 @@ extern "C" okld_u32 okld_touches(const void* image, okld_size n, okld_u32* out, 
 // so that a loader maps it as it maps an image's own file.
 
 namespace {
-constexpr size prepared_fixed = 4 + 4 + 8 + 32 + 4 + 4 + 8 * 5;   // the descriptor before its blocks
+constexpr size prepared_fixed = 4 + 4 + 8 + 32 + 4 + 4 + 8 * 8;   // the descriptor before its blocks
 
 void put_info(unsigned char* d, const okld_prepared_info& i) {
     size at = 0;
     auto put = [&](const void* p, size k) { copy(d + at, p, k); at += k; };
-    put(&i.version, 4); put(&i.flags, 4); put(&i.base, 8); put(i.digest, 32); put(&i.count, 4); put(&i.reserved, 4);
+    put(&i.version, 4); put(&i.flags, 4); put(&i.base, 8); put(i.digest, 32); put(&i.count, 4); put(&i.facts, 4); put(&i.asked, 8);
     put(&i.arena, 8); put(&i.arena_size, 8); put(&i.context, 8); put(&i.start, 8); put(&i.state, 8);
+    put(&i.kept, 8); put(&i.kept_size, 8);
 }
 
 void get_info(const unsigned char* d, okld_prepared_info& i) {
     size at = 0;
     auto get = [&](void* p, size k) { copy(p, d + at, k); at += k; };
-    get(&i.version, 4); get(&i.flags, 4); get(&i.base, 8); get(i.digest, 32); get(&i.count, 4); get(&i.reserved, 4);
+    get(&i.version, 4); get(&i.flags, 4); get(&i.base, 8); get(i.digest, 32); get(&i.count, 4); get(&i.facts, 4); get(&i.asked, 8);
     get(&i.arena, 8); get(&i.arena_size, 8); get(&i.context, 8); get(&i.start, 8); get(&i.state, 8);
+    get(&i.kept, 8); get(&i.kept_size, 8);
 }
 }  // namespace
 
 extern "C" okld_u64 okld_prepare_blocks(const okld_prepared_info* info, const okld_prepared_block* blocks,
                                         const void* (*source)(okld_u64, okld_u64, void*), void* ctx,
-                                        void* out, okld_u64 cap) {
-    if (!info || (info->count && !blocks) || !source) return 0;
+                                        const void* kept, okld_u64 kept_size, void* out, okld_u64 cap) {
+    if (!info || (info->count && !blocks) || !source || (kept_size && !kept)) return 0;
     const elf::u64 desc = prepared_fixed + static_cast<elf::u64>(info->count) * 24;
     const elf::u64 header = sizeof(elf::nhdr) + 8 + ((desc + 3) & ~3ull);
-    // Each block at an offset congruent to its address modulo the alignment.
+    // Each block at an offset congruent to its address modulo the alignment;
+    // the runner's bytes after the last, at a multiple of eight.
     elf::u64 at = header;
     for (elf::u32 i = 0; i < info->count; ++i) {
         const elf::u64 offset = at + ((blocks[i].address % alignment) + alignment - (at % alignment)) % alignment;
         at = offset + blocks[i].size;
     }
-    const elf::u64 total = at;
+    const elf::u64 kept_at = kept_size ? (at + 7) & ~7ull : 0;
+    const elf::u64 total = kept_size ? kept_at + kept_size : at;
     if (!out || cap < total) return total;
     auto* o = static_cast<unsigned char*>(out);
     fill(o, 0, total);
@@ -324,7 +328,11 @@ extern "C" okld_u64 okld_prepare_blocks(const okld_prepared_info* info, const ok
     copy(o, &nh, sizeof nh);
     copy(o + sizeof nh, "OPENKAL", 8);
     unsigned char* d = o + sizeof nh + 8;
-    put_info(d, *info);
+    okld_prepared_info written = *info;
+    written.kept = kept_at;
+    written.kept_size = kept_size;
+    put_info(d, written);
+    if (kept_size) copy(o + kept_at, kept, kept_size);
     at = header;
     for (elf::u32 i = 0; i < info->count; ++i) {
         const elf::u64 offset = at + ((blocks[i].address % alignment) + alignment - (at % alignment)) % alignment;
@@ -379,11 +387,11 @@ extern "C" okld_u64 okld_prepare(const void* image, okld_size n, okld_u64 base, 
         return 0;
     }
     file_of f{ &v, static_cast<const unsigned char*>(image), base };
-    const okld_u64 total = okld_prepare_blocks(&info, blocks, &file_segment, &f, nullptr, 0);
+    const okld_u64 total = okld_prepare_blocks(&info, blocks, &file_segment, &f, nullptr, 0, nullptr, 0);
     if (!out || cap < total) return total;
     // The segments written where they go, and then relocated there.
     auto* o = static_cast<unsigned char*>(out);
-    if (okld_prepare_blocks(&info, blocks, &file_segment, &f, out, cap) != total) return 0;
+    if (okld_prepare_blocks(&info, blocks, &file_segment, &f, nullptr, 0, out, cap) != total) return 0;
     okld_prepared_info back{};
     okld_prepared_block placed[8];
     if (okld_prepared(o, total, &back, placed, 8) != 0) return 0;
@@ -405,6 +413,7 @@ extern "C" int okld_prepared(const void* prepared, okld_size n, okld_prepared_in
     const unsigned char* d = b + sizeof nh + 8;
     get_info(d, *info);
     if (info->version != 1 || prepared_fixed + static_cast<elf::u64>(info->count) * 24 > nh.descsz) return -1;
+    if (info->kept_size && (info->kept > n || info->kept_size > n - info->kept)) return -1;
     for (elf::u32 i = 0; i < info->count && i < cap; ++i) {
         copy(&blocks[i], d + prepared_fixed + i * 24, 24);
         if (blocks[i].offset > n || blocks[i].size > n - blocks[i].offset) return -1;

@@ -26,6 +26,7 @@ export using ::okld_sign;
 export using ::okld_verify;
 export using ::okld_public_key;
 export using ::okld_load;
+export using ::okld_bound_imports;
 export using ::okld_initialise;
 export using ::okld_finalise;
 export using ::okld_symbol;
@@ -79,4 +80,5 @@ inline constexpr int map_execute = OKLD_MAP_EXECUTE;
 inline constexpr int map_prefetch = OKLD_MAP_PREFETCH;
 inline constexpr int map_write = OKLD_MAP_WRITE;
 inline constexpr okld_u32 prepared_snapshot = OKLD_PREPARED_SNAPSHOT;
+inline constexpr okld_u32 prepared_max = OKLD_PREPARED_MAX;
 }

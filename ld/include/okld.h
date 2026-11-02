@@ -351,6 +351,8 @@ okld_u32 okld_touches(const void* image, okld_size size, okld_u32* out, okld_u32
  * loader takes the image's code from the image and these blocks for its data,
  * mapping each block it can and copying the rest. */
 #define OKLD_PREPARED_SNAPSHOT 1u
+/* The blocks a prepared copy holds at most. */
+#define OKLD_PREPARED_MAX 256u
 
 struct okld_prepared_block {
     okld_u64 address;     /* where the bytes go */
@@ -363,8 +365,14 @@ struct okld_prepared_info {
     okld_u32 flags;       /* OKLD_PREPARED_* */
     okld_u64 base;        /* the image's base */
     unsigned char digest[32];   /* the image, by the runner's name for it (SHA-256) */
-    okld_u32 count;       /* blocks */
-    okld_u32 reserved;
+    okld_u32 count;       /* blocks, at most OKLD_PREPARED_MAX */
+    okld_u32 facts;       /* snapshot: a word of what the environment answered the
+                             initialisers, which a start compares with its own */
+    okld_u64 asked;       /* snapshot: which of a start's own answers the initialisers
+                             asked for (the runner's positions), folded into `facts' */
+    okld_u64 kept;        /* the runner's own bytes kept with the copy: their offset in
+                             the file (0: none), after the blocks */
+    okld_u64 kept_size;   /* and their size */
     okld_u64 arena;       /* snapshot: the arena's address, after the image's span */
     okld_u64 arena_size;  /* snapshot: the bytes of it the state reaches */
     okld_u64 context;     /* snapshot: the word of the context the initialisers ran on */
@@ -380,10 +388,11 @@ struct okld_prepared_info {
 okld_u64 okld_prepare(const void* image, okld_size size, okld_u64 base, const unsigned char digest[32],
                       void* out, okld_u64 cap, struct okld_why* why);
 /* Writes a prepared file of `info' and `blocks', each block's bytes from
- * `source(address)' --- the whole of a snapshot's --- as okld_prepare does. */
+ * `source(address)' --- the whole of a snapshot's --- and `kept_size' bytes of
+ * the runner's own from `kept' after them, as okld_prepare does. */
 okld_u64 okld_prepare_blocks(const struct okld_prepared_info* info, const struct okld_prepared_block* blocks,
                              const void* (*source)(okld_u64 address, okld_u64 size, void* ctx), void* ctx,
-                             void* out, okld_u64 cap);
+                             const void* kept, okld_u64 kept_size, void* out, okld_u64 cap);
 /* Reads a prepared file's note: 0, or negative when it is not one. Its blocks,
  * up to `cap', into `blocks'. */
 int okld_prepared(const void* prepared, okld_size size, struct okld_prepared_info* info,
@@ -398,13 +407,25 @@ int  okld_load(const void* bytes, okld_size size, const char* name,
                const struct okld_host* host, struct okld_module** out, struct okld_why* why);
 /* okld_load, the image's data taken from a prepared copy (type 5) of it: at the
  * copy's base, which the host reserves (reserve_at) or the load is refused;
- * with a snapshot, its arena reserved after the span and its initialisers
- * counted as run. The copy is a file of its own: `okld_host::map' is given its
- * bytes. Its digest is not compared with the image's: the caller named both.
- * Version 0.4. */
+ * with a snapshot, its arena reserved after the span, its initialisers
+ * counted as run, and of its relocations only those naming an import applied
+ * again --- what the initialisers wrote over the rest is the snapshot's. A
+ * snapshot of an image that needs another is refused: the images it needs
+ * would start without theirs. The copy is a file of its own: `okld_host::map'
+ * is given its bytes. Its digest and its facts are not compared with the
+ * image's and the environment's: the caller named both. Version 0.4. */
 int  okld_load_prepared(const void* bytes, okld_size size, const char* name, const struct okld_host* host,
                         const void* prepared, okld_size prepared_size, struct okld_module** out,
                         struct okld_why* why);
+/* EACH WORD A RELOCATION OF THE MODULE WRITES WITH THE ADDRESS OF A NAME IT
+ * IMPORTS --- a symbol it does not define --- and the value the loader writes
+ * there now: the words a load of the module's snapshot writes again, for the
+ * process it is loaded into, and the only words of a snapshot that may hold
+ * an address the runner gave. Stops when `each' returns non-zero, and returns
+ * that. Version 0.4. */
+int okld_bound_imports(struct okld_module* m, int (*each)(void* slot, okld_u64 value, const char* name, void* ctx),
+                       void* ctx);
+
 /* Runs the initialisers of the module and of the modules it needs, needed ones
  * first, each once. `call' enters a function of the image in the image's
  * convention (the runner supplies it; see okrun). */

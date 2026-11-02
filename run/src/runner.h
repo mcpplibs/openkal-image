@@ -53,6 +53,38 @@ kal_intptr symbolize(kal_uintptr address, char* out, kal_uintptr cap, kal_uintpt
 // prefix of it, and the rest (src/run.cpp).
 bool locate_path(const char* path, kal_dir& dir, const char*& rest);
 const binding* space_bindings(unsigned long& count);
+// openkal.space's word of properties and its binding where it is bound; zero
+// and null where it is not (src/bindings_space.cpp, src/no_space.cpp).
+kal_uintptr space_props();
+void* space_props_binding();
+// The word of interfaces an image is told: the implementation's, and the
+// loader's own (openkal.prof, openkal.debug; SPEC 12.3).
+kal_u64 own_interfaces();
+
+// --- a snapshot of an image's initialisers (0.4, src/seal.cpp) ---------------
+//
+// The bindings while they run: memory from an arena above the image's end
+// (`seal_begin'), the implementation's facts, `kSealContext' as the one
+// context, and every other name a refusal, which ends the runner making the
+// snapshot with the name it was asked (`seal_refused', src/run.cpp).
+inline constexpr kal_uintptr kSealContext = static_cast<kal_uintptr>(0x5ea1ed0000000001ull);
+[[noreturn]] void seal_refused(const char* what);
+void    seal_begin(kal_u64 image_end);
+// The arena's addresses, [lo, hi): all the environment gave it.
+void    seal_arena(kal_u64& lo, kal_u64& hi);
+void*   seal_resolve(const char* name);
+// Whether a word is the address of one of the bindings above.
+bool    seal_is_binding(kal_uintptr word);
+// Which of a start's own answers the initialisers asked for, and what the
+// implementation states of itself with those answers, as one word a snapshot
+// records.
+kal_u64 seal_asked();
+kal_u32 environment_facts(kal_u64 asked);
+// The named values the initialisers asked for, with a word of each answer, as
+// bytes kept with the snapshot (`out' null: their size); and whether this start
+// answers each the same.
+kal_u64 seal_kept(void* out, kal_u64 cap);
+bool    seal_kept_holds(const void* kept, kal_u64 size);
 
 inline bool same(const char* a, const char* b) {
     for (;; ++a, ++b) { if (*a != *b) return false; if (!*a) return true; }

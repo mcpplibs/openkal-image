@@ -33,6 +33,9 @@ struct okld_module {
     const elf::u32*   hash = nullptr;         // DT_HASH
     const elf::u32*   gnu_hash = nullptr;     // DT_GNU_HASH
     elf::u64          init = 0, fini = 0, init_array = 0, init_arraysz = 0, fini_array = 0, fini_arraysz = 0;
+    // The relocation tables, within the mapped image (okld_bound_imports).
+    elf::u64          rela = ~0ull, relasz = 0, jmprel = ~0ull, pltrelsz = 0;
+    bool              x86 = false;
     void*             debug_entry = nullptr;  // the GDB JIT record
     void*             debug_copy = nullptr;
     okld_size         debug_size = 0;
@@ -198,11 +201,23 @@ void withdraw(okld_module* m) {
     m->host->free(e, sizeof(jit_code_entry), m->host->ctx);
 }
 
+// Whether a relocation's symbol is one the module imports: named, and not
+// defined by it.
+bool imports(const okld_module* m, elf::u32 index) {
+    return index != 0 && m->symtab[index].shndx == elf::shn_undef;
+}
+
 // EACH RELOCATION WRITES A WRITABLE SEGMENT, or the image is refused: a
 // segment that is not writable may be the file's own pages (okld_host::map),
 // and a write the format does not allow (SPEC 12.2: no text relocation) is
 // refused rather than made wherever its offset points.
-int relocate(okld_module* m, const view& v, const okld_host* host, const writable& w, bool placed, okld_why* why) {
+// What a load applies: every relocation (anywhere), those naming a symbol (at
+// a base, whose bytes hold the relative ones), or those naming an import (a
+// snapshot, whose bytes hold what the initialisers made of the rest).
+enum class applying { all, named, imports };
+
+int relocate(okld_module* m, const view& v, const okld_host* host, const writable& w, applying what, okld_why* why) {
+    const bool placed = what != applying::all;
     const elf::u64 b = reinterpret_cast<elf::u64>(m->base);
     const bool x86 = v.eh->machine == elf::em_x86_64;
     auto symbol_address = [&](elf::u32 index, bool& ok) -> elf::u64 {
@@ -234,6 +249,7 @@ int relocate(okld_module* m, const view& v, const okld_host* host, const writabl
             // AT ITS BASE THE RELATIVE ONES ARE ALREADY IN THE BYTES (SPEC
             // 12.3, openkal 0.23): what remains names a symbol.
             if (placed && !names_a_symbol(v, t)) continue;
+            if (what == applying::imports && !imports(m, elf::r_sym(r[k].info))) continue;
             bool ok = true;
             if (x86) {
                 switch (t) {
@@ -312,7 +328,7 @@ struct source {
     const unsigned char* bytes = nullptr;   // the file the blocks are in
     size                 n = 0;
     elf::u64             base = 0;
-    okld_prepared_block  block[64];
+    okld_prepared_block  block[OKLD_PREPARED_MAX];
     elf::u32             count = 0;
     bool                 snapshot = false;
     elf::u64             arena = 0, arena_size = 0;
@@ -452,7 +468,7 @@ bool placement_source(const view& v, const placement& p, const void* bytes, sour
     out.n = v.len;
     out.base = p.base;
     out.count = 0;
-    for (elf::u32 i = 0; i < p.count && out.count < 64; ++i)
+    for (elf::u32 i = 0; i < p.count && out.count < OKLD_PREPARED_MAX; ++i)
         out.block[out.count++] = okld_prepared_block{ p.base + p.e[i].vaddr, p.e[i].offset, p.e[i].size };
     return true;
 }
@@ -492,6 +508,11 @@ int load_image(const void* bytes, okld_size n, const char* name, const okld_host
         if (dyn[k].tag != elf::dt_needed) continue;
         const char* need = v.string(dyn[k].val);
         if (!need) continue;
+        if (prepared && prepared->snapshot) {
+            say(why, "a snapshot of an image that needs '", need, "' is refused: that image would start without its own");
+            host->free(m, sizeof *m, host->ctx);
+            return -1;
+        }
         if (m->needed_count == 16) { say(why, "the image needs more than sixteen images"); host->free(m, sizeof *m, host->ctx); return -1; }
         okld_size nsize = 0;
         const void* nbytes = host->find_needed ? host->find_needed(need, &nsize, host->ctx) : nullptr;
@@ -653,8 +674,12 @@ int load_image(const void* bytes, okld_size n, const char* name, const okld_host
     m->init = v.dynamic(elf::dt_init); m->fini = v.dynamic(elf::dt_fini);
     m->init_array = v.dynamic(elf::dt_init_array); m->init_arraysz = v.dynamic(elf::dt_init_arraysz);
     m->fini_array = v.dynamic(elf::dt_fini_array); m->fini_arraysz = v.dynamic(elf::dt_fini_arraysz);
+    m->rela = v.dynamic(elf::dt_rela, ~0ull); m->relasz = v.dynamic(elf::dt_relasz);
+    m->jmprel = v.dynamic(elf::dt_jmprel, ~0ull); m->pltrelsz = v.dynamic(elf::dt_pltrelsz);
+    m->x86 = v.eh->machine == elf::em_x86_64;
 
-    if (relocate(m, v, host, w, placed, why) != 0) { discard(m); return -1; }
+    const applying what = !placed ? applying::all : src->snapshot ? applying::imports : applying::named;
+    if (relocate(m, v, host, w, what, why) != 0) { discard(m); return -1; }
 
     // READ-ONLY AFTER RELOCATION (openkal 0.23): the addresses of functions and
     // data relocation wrote, made read-only now, as a program of the
@@ -703,7 +728,8 @@ extern "C" int okld_load_prepared(const void* bytes, okld_size n, const char* na
                                   const void* prepared, okld_size prepared_size, okld_module** out, okld_why* why) {
     okld_prepared_info info{};
     source src;
-    if (okld_prepared(prepared, prepared_size, &info, src.block, 64) != 0 || info.count > 64) {
+    if (okld_prepared(prepared, prepared_size, &info, src.block, OKLD_PREPARED_MAX) != 0
+        || info.count > OKLD_PREPARED_MAX) {
         say(why, "not a prepared copy of an image (SPEC 12.4, type 5)");
         return -1;
     }
@@ -742,6 +768,33 @@ void run_fini(okld_module* m, void (*call)(void*, void*), void* ctx) {
     for (okld_size k = m->needed_count; k > 0; --k) run_fini(m->needed[k - 1], call, ctx);
 }
 }  // namespace
+
+extern "C" int okld_bound_imports(okld_module* m, int (*each)(void*, okld_u64, const char*, void*), void* ctx) {
+    if (!m || !each) return 0;
+    const okld_host* host = m->host;
+    const elf::u64 tables[2][2] = { { m->rela, m->relasz }, { m->jmprel, m->pltrelsz } };
+    for (const auto& t : tables) {
+        if (t[0] == ~0ull) continue;
+        const auto* r = reinterpret_cast<const elf::rela*>(m->base + t[0]);
+        for (elf::u64 k = 0; k < t[1] / sizeof(elf::rela); ++k) {
+            const elf::u32 index = elf::r_sym(r[k].info);
+            if (!imports(m, index)) continue;
+            const auto& sym = m->symtab[index];
+            const char* name = sym.name < m->strsz ? m->strtab + sym.name : "";
+            elf::u64 value = 0;
+            if (void* p = host->resolve ? host->resolve(name, host->ctx) : nullptr) value = reinterpret_cast<elf::u64>(p);
+            for (okld_size n = 0; value == 0 && n < m->needed_count; ++n)
+                if (void* p = lookup(m->needed[n], name)) value = reinterpret_cast<elf::u64>(p);
+            // The addend counts where the relocation adds it: every type but
+            // x86-64's GLOB_DAT and JUMP_SLOT.
+            const elf::u32 type = elf::r_type(r[k].info);
+            const bool adds = !m->x86 || (type != elf::r_x86_64_glob_dat && type != elf::r_x86_64_jump_slot);
+            if (value != 0 && adds) value += static_cast<elf::u64>(r[k].addend);
+            if (const int stop = each(m->base + r[k].offset, value, name, ctx)) return stop;
+        }
+    }
+    return 0;
+}
 
 extern "C" void okld_initialise(okld_module* m, void (*call)(void*, void*), void* ctx) { run_init(m, call, ctx); }
 extern "C" void okld_finalise(okld_module* m, void (*call)(void*, void*), void* ctx) { run_fini(m, call, ctx); }
