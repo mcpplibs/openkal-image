@@ -41,7 +41,14 @@ okrun app.okb arguments...                                           # this mach
 ```
 
 The images an image needs are found in the okb, then beside it, in `lib/<arch>/` and `lib/`, and
-in `OKRUN_PATH`. A program that carries its images gives their archive to
+in `OKRUN_PATH`.
+
+**An image's instructions and read-only data are its file's pages** (0.3.0, openkal 0.21): where
+the implementation reports `KAL_EXEC_PROP_FILE`, the loader makes each segment no relocation
+writes a part of the file (`kal_exec_map_part`) rather than a copy, for an image file and for an
+image stored aligned in an okb; the writable segments are copied. A program then starts as a
+program of its system does: a language server's worker made 1 200 page faults where it made
+16 000. A relocation that would write a segment that is not writable is refused (SPEC 12.2). A program that carries its images gives their archive to
 `okrun_run_okb_bytes`, which runs it from memory and writes nothing to disk.
 
 ## A measurement of an image

@@ -84,6 +84,21 @@ void sync_instructions(unsigned char* from, unsigned char* to) {
 elf::u64 round_up(elf::u64 v, elf::u64 g) { return (v + g - 1) & ~(g - 1); }
 elf::u64 round_down(elf::u64 v, elf::u64 g) { return v & ~(g - 1); }
 
+// The alignment of an offset into a file that is mapped: openkal's
+// KAL_MAP_ALIGNMENT, to which every loadable segment is aligned (SPEC 12.2).
+constexpr elf::u64 file_alignment = 65536;
+
+// The parts of the span relocations may write: the writable segments.
+struct writable {
+    elf::u64 from[8] = {}, to[8] = {};
+    unsigned count = 0;
+    bool holds(elf::u64 at, elf::u64 bytes) const {
+        for (unsigned k = 0; k < count; ++k)
+            if (at >= from[k] && at <= to[k] && bytes <= to[k] - at) return true;
+        return false;
+    }
+};
+
 void say(okld_why* why, const char* a, const char* b = nullptr, const char* c = nullptr) {
     if (!why) return;
     sentence s(why->text, sizeof why->text);
@@ -183,7 +198,11 @@ void withdraw(okld_module* m) {
     m->host->free(e, sizeof(jit_code_entry), m->host->ctx);
 }
 
-int relocate(okld_module* m, const view& v, const okld_host* host, okld_why* why) {
+// EACH RELOCATION WRITES A WRITABLE SEGMENT, or the image is refused: a
+// segment that is not writable may be the file's own pages (okld_host::map),
+// and a write the format does not allow (SPEC 12.2: no text relocation) is
+// refused rather than made wherever its offset points.
+int relocate(okld_module* m, const view& v, const okld_host* host, const writable& w, okld_why* why) {
     const elf::u64 b = reinterpret_cast<elf::u64>(m->base);
     const bool x86 = v.eh->machine == elf::em_x86_64;
     auto symbol_address = [&](elf::u32 index, bool& ok) -> elf::u64 {
@@ -205,6 +224,11 @@ int relocate(okld_module* m, const view& v, const okld_host* host, okld_why* why
         if (at == ~0ull || bytes == 0) return true;
         const auto* r = reinterpret_cast<const elf::rela*>(m->base + at);
         for (elf::u64 k = 0; k < bytes / sizeof(elf::rela); ++k) {
+            if (elf::r_type(r[k].info) != (x86 ? elf::r_x86_64_none : elf::r_aarch64_none)
+                && !w.holds(r[k].offset, 8)) {
+                say(why, "a relocation writes outside the image's writable segments (SPEC 12.2)");
+                return false;
+            }
             auto* where = reinterpret_cast<elf::u64*>(m->base + r[k].offset);
             const elf::u32 t = elf::r_type(r[k].info);
             bool ok = true;
@@ -237,16 +261,26 @@ int relocate(okld_module* m, const view& v, const okld_host* host, okld_why* why
     if (const elf::u64 at = v.dynamic(elf::dt_relr, ~0ull); at != ~0ull) {
         const elf::u64 bytes = v.dynamic(elf::dt_relrsz);
         const auto* e = reinterpret_cast<const elf::u64*>(m->base + at);
-        elf::u64* where = nullptr;
-        for (elf::u64 k = 0; k < bytes / 8; ++k) {
+        elf::u64 next = 0;   // the offset the first bit of a bitmap entry names
+        bool ok = true;
+        for (elf::u64 k = 0; ok && k < bytes / 8; ++k) {
             if ((e[k] & 1) == 0) {
-                where = reinterpret_cast<elf::u64*>(m->base + e[k]);
-                *where++ += b;
+                ok = w.holds(e[k], 8);
+                if (ok) *reinterpret_cast<elf::u64*>(m->base + e[k]) += b;
+                next = e[k] + 8;
             } else {
                 elf::u64 bits = e[k] >> 1;
-                for (int i = 0; bits; ++i, bits >>= 1) if (bits & 1) where[i] += b;
-                where += 63;
+                for (elf::u64 i = 0; ok && bits; ++i, bits >>= 1) {
+                    if (!(bits & 1)) continue;
+                    ok = w.holds(next + 8 * i, 8);
+                    if (ok) *reinterpret_cast<elf::u64*>(m->base + next + 8 * i) += b;
+                }
+                next += 63 * 8;
             }
+        }
+        if (!ok) {
+            say(why, "a relocation writes outside the image's writable segments (SPEC 12.2)");
+            return -1;
         }
     }
     return 0;
@@ -313,11 +347,41 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
     // Each segment is its file bytes and then zeros to its size in memory. What
     // lies between segments is no segment's and is not written: a page the image
     // never touches is not made resident.
+    //
+    // A SEGMENT NOTHING WRITES IS THE FILE'S OWN PAGES where the host can make
+    // it so (0.3, openkal 0.21): instructions and read-only data are the file's
+    // bytes unchanged, and a copy of them made each program that started write
+    // and hold the whole of them --- 54 MB and 14 000 page faults before the
+    // first instruction of a language server, where a program of the
+    // environment pays for the pages it touches. Mapped from the alignment
+    // below the segment to the granule above its end, which no other segment
+    // shares; otherwise, and where the host declines, copied.
+    bool mapped[32] = {};
+    writable w;
     for (unsigned k = 0; k < v.eh->phnum; ++k) {
         const auto& p = v.ph[k];
         if (p.type != elf::pt_load) continue;
         if (p.offset + p.filesz > n) { say(why, "a segment extends beyond the file"); host->release(m->base, m->span, host->ctx); host->free(m, sizeof *m, host->ctx); return -1; }
         if (p.filesz > p.memsz) { say(why, "a segment holds more of the file than its size in memory"); host->release(m->base, m->span, host->ctx); host->free(m, sizeof *m, host->ctx); return -1; }
+        if (p.flags & elf::pf_w) {
+            if (w.count == 8) { say(why, "the image has more than eight writable segments"); host->release(m->base, m->span, host->ctx); host->free(m, sizeof *m, host->ctx); return -1; }
+            w.from[w.count] = p.vaddr; w.to[w.count] = p.vaddr + p.memsz; ++w.count;
+        } else if (host->map && k < 32 && p.filesz == p.memsz && p.filesz != 0
+                   && p.vaddr % file_alignment == p.offset % file_alignment) {
+            const elf::u64 lo = round_down(p.vaddr, file_alignment), hi = round_up(p.vaddr + p.filesz, g);
+            const elf::u64 from = p.offset - (p.vaddr - lo);
+            bool alone = from + (hi - lo) <= n;
+            for (unsigned j = 0; alone && j < v.eh->phnum; ++j) {
+                const auto& q = v.ph[j];
+                if (j == k || q.type != elf::pt_load) continue;
+                const elf::u64 qlo = round_down(q.vaddr, g), qhi = round_up(q.vaddr + q.memsz, g);
+                if (qlo < hi && lo < qhi) alone = false;
+            }
+            if (alone && host->map(m->base, lo, hi - lo, bytes, from, (p.flags & elf::pf_x) != 0, host->ctx) == 0) {
+                mapped[k] = true;
+                continue;
+            }
+        }
         copy(m->base + p.vaddr, static_cast<const unsigned char*>(bytes) + p.offset, p.filesz);
         fill(m->base + p.vaddr + p.filesz, 0, p.memsz - p.filesz);
     }
@@ -345,20 +409,23 @@ extern "C" int okld_load(const void* bytes, okld_size n, const char* name, const
     m->init_array = v.dynamic(elf::dt_init_array); m->init_arraysz = v.dynamic(elf::dt_init_arraysz);
     m->fini_array = v.dynamic(elf::dt_fini_array); m->fini_arraysz = v.dynamic(elf::dt_fini_arraysz);
 
-    if (relocate(m, v, host, why) != 0) { discard(m); return -1; }
+    if (relocate(m, v, host, w, why) != 0) { discard(m); return -1; }
 
-    // Publish what executes; the rest stays writable.
+    // Publish what executes and was copied; the rest stays writable. A segment
+    // that is the file's pages is executable already, and its bytes reached
+    // memory through the environment rather than through this loader's data
+    // path, so its instructions need no maintenance here either.
     for (unsigned k = 0; k < v.eh->phnum; ++k) {
         const auto& p = v.ph[k];
-        if (p.type != elf::pt_load || !(p.flags & elf::pf_x)) continue;
+        if (p.type != elf::pt_load || !(p.flags & elf::pf_x) || (k < 32 && mapped[k])) continue;
         const elf::u64 from = round_down(p.vaddr, g), to = round_up(p.vaddr + p.memsz, g);
         if (host->publish(m->base, from, to - from, host->ctx) != 0) {
             say(why, "the environment refused to make the image's instructions executable");
             discard(m);
             return -1;
         }
+        sync_instructions(m->base + p.vaddr, m->base + p.vaddr + p.memsz);
     }
-    sync_instructions(m->base, m->base + m->span);
 
     lock();
     m->next = g_modules;
