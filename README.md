@@ -51,6 +51,12 @@ program of its system does: a language server's worker made 1 200 page faults wh
 16 000. A relocation that would write a segment that is not writable is refused (SPEC 12.2). A program that carries its images gives their archive to
 `okrun_run_okb_bytes`, which runs it from memory and writes nothing to disk.
 
+**A remembered admission reads no byte of the member** (0.3.1): a start of an okb whose member was
+compared before, on the same file, admits it by its shape (`okld_okb_admit_layout`: stored, within
+the archive, aligned). 0.2.0 and 0.3.0 computed the CRC-32 the archive states there, a pass over the
+whole member on every start: 0.1 s of processor time for a 71 MB clangd image, on each of the 176
+workers a language server starts for a cold build of 176 modules.
+
 ## A measurement of an image
 
 The runner binds every name an image calls across openkal and read the image's file, so it
