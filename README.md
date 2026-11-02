@@ -57,6 +57,11 @@ the archive, aligned). 0.2.0 and 0.3.0 computed the CRC-32 the archive states th
 whole member on every start: 0.1 s of processor time for a 71 MB clangd image, on each of the 176
 workers a language server starts for a cold build of 176 modules.
 
+**Over openkal 0.22** (0.3.2): the runner is built over openkal 0.22's implementations, so an image
+starts a program with the system's null device at a position (`KAL_SPAWN_NULL_IN`, `_OUT`,
+`_ERR`), which the image's C library maps `/dev/null` onto; on Windows an image's workers started
+with their output discarded could not start before.
+
 ## A measurement of an image
 
 The runner binds every name an image calls across openkal and read the image's file, so it
