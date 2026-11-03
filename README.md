@@ -101,6 +101,11 @@ resource preference or named values the initialisers read differ from those the 
 made under does not use it, and an initialiser that asks for anything else of the start is
 refused a snapshot. openkal-musl 0.27.0 takes part. `OKRUN_SNAPSHOT=0` runs the initialisers.
 
+**Over openkal-macos 0.21.1** (0.4.1): the runner on macOS is built over an implementation whose
+sleep suspends the context. Under 0.21.0 the wait it suspends with failed at once for a word whose
+page was not yet present, and an image's sleep on macOS was a spin of the processor for its whole
+length.
+
 ## What a start spends
 
 A program's resource preference (openkal 0.23: balanced, performance, economy) decides what
