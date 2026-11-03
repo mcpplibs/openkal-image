@@ -109,6 +109,11 @@ each start, and a snapshot compared among the implementation's facts was decline
 0.4.2 is built over openkal-macos 0.21.3, whose answers to an initialiser that runs before its own are
 the loader's record of the arguments and the environment.
 
+**Touched images on Windows** (0.4.4): if the environment accepts an initial file mapping and
+refuses a later run of the same segment, the loader copies only the refused run. Already mapped
+read-only pages remain intact. A copied executable run is published separately; refusal to publish
+rejects the load. This corrects a startup access violation in profiled images with a short tail.
+
 **Read-only confinement on Linux** (0.4.3): the runner is built over openkal-linux 0.24.1. It
 claims confinement only with Landlock ABI 3 or later, whose policy can prevent file truncation in
 a read-only grant. Earlier ABIs refuse a confinement request before starting a program. The
