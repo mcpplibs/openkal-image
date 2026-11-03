@@ -624,12 +624,15 @@ int record_cmd(std::vector<std::string> args) {
     const std::string spec = std::format("OKRUN_PROF={}:{}", runner_what, std::filesystem::absolute(dir, ec).generic_string());
     std::vector<std::string> env;
     for (kal_uintptr i = 0; i < kal_env_var_count(); ++i) {
-        char entry[16384];
-        const kal_intptr n = kal_env_var_at(i, entry, sizeof entry);
-        if (n <= 0 || n >= static_cast<kal_intptr>(sizeof entry)) continue;
-        std::string e(entry, static_cast<std::size_t>(n));
-        if (e.starts_with("OKRUN_PROF=")) continue;
-        env.push_back(std::move(e));
+        // var_at enumerates names; var obtains the value, including an empty one.
+        char name[16384], value[16384];
+        const kal_intptr n = kal_env_var_at(i, name, sizeof name);
+        if (n <= 0 || n >= static_cast<kal_intptr>(sizeof name)) continue;
+        const std::string key(name, static_cast<std::size_t>(n));
+        if (key == "OKRUN_PROF") continue;
+        const kal_intptr v = kal_env_var(name, static_cast<kal_uintptr>(n), value, sizeof value);
+        if (v < 0 || v >= static_cast<kal_intptr>(sizeof value)) continue;
+        env.push_back(key + "=" + std::string(value, static_cast<std::size_t>(v)));
     }
     if (!runner_what.empty()) env.push_back(spec);
     std::vector<const char*> argv, envp;

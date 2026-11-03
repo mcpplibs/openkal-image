@@ -234,6 +234,10 @@ jobs:
           okprof=$(find "$PWD/target" -path '*bin*' \( -name okprof -o -name okprof.exe \) -type f | head -1)
           [ -n "$okprof" ] || { echo "::error::okprof did not build"; exit 1; }
           echo "OKPROF=$okprof" >> "$GITHUB_ENV"
+      - name: okprof forwards environment values and the child's status
+        run: |
+          python=python3; [ "$RUNNER_OS" = Windows ] && python=python
+          "$python" tools/tests/record_env.py --okprof "$OKPROF"
       - name: The same bytes
         run: |
           a='${{ matrix.arch }}'
