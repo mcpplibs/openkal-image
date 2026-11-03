@@ -109,6 +109,11 @@ each start, and a snapshot compared among the implementation's facts was decline
 0.4.2 is built over openkal-macos 0.21.3, whose answers to an initialiser that runs before its own are
 the loader's record of the arguments and the environment.
 
+**Read-only confinement on Linux** (0.4.3): the runner is built over openkal-linux 0.24.1. It
+claims confinement only with Landlock ABI 3 or later, whose policy can prevent file truncation in
+a read-only grant. Earlier ABIs refuse a confinement request before starting a program. The
+implementation's ABI probe cache uses atomic accesses during concurrent first queries.
+
 ## What a start spends
 
 A program's resource preference (openkal 0.23: balanced, performance, economy) decides what

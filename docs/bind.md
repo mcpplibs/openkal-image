@@ -24,10 +24,10 @@ sources      = []
 include_dirs = ["include"]
 
 [target.'cfg(not(os = "openkal"))'.dependencies]
-openkal-run = "0.4.2"
+openkal-run = "0.4.3"
 
 [build-dependencies]
-openkal-bind = "0.4.2"
+openkal-bind = "0.4.3"
 ```
 
 ```cpp
@@ -111,4 +111,5 @@ llvm toolchain's clang converts the call.
 | 0.4.0 | No change of its own; released with the archive, whose loader places an image at the base `okld place` chose for it (openkal 0.23, `kal_exec_alloc_at`) and then applies only the relocations that name a symbol. |
 | 0.4.1 | No change of its own; released with the archive, whose runner on macOS is built over openkal-macos 0.21.2 (a sleep is no longer a spin of the processor; the granularity is the same at every start). |
 | 0.4.2 | No change of its own; released with the archive, whose runner on macOS is built over openkal-macos 0.21.3 (asked before the implementation's initialiser ran, it answers from the loader's record). |
+| 0.4.3 | No change of its own; released with the archive, whose runner on Linux uses openkal-linux 0.24.1 and requires Landlock ABI 3 before claiming confinement of read-only grants. |
 | 0.1.9 | No change of its own; released with the archive, whose runner on macOS is built over openkal-macos 0.17.1 (`kal_task_current` without a system call). |
