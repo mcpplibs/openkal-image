@@ -27,9 +27,9 @@ permissions:
 
 env:
   MCPP_SOURCE_REF: ${{ github.event.inputs.mcpp_ref || vars.MCPP_SOURCE_REF || '' }}
-  # 2026.11.2.1: openkal-platform 0.21.0's C library, openkal-musl 0.26.0,
-  # embeds its allocator (`embed') and states mcpp >= 2026.11.
-  MCPP_VERSION: 2026.11.2.1
+  # 2026.11.3.1 compiles the std module with the selected platform's flags.
+  # mcpp_ref supplies the candidate until this release is installable.
+  MCPP_VERSION: 2026.11.3.1
   # The platform whose hosted arrangement the programs are built over, named by
   # the dispatch beside the tag: a tag's tools pin exact implementations, and the
   # platform is the one whose version group holds them (0.1.4: 0.18.0; 0.1.5:
