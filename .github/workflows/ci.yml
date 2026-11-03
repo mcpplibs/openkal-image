@@ -78,6 +78,14 @@ jobs:
             bash examples/build-image.sh "$arch" "out/$arch/libmathlib.okso" examples/bind/mathlib/image/mathlib.c
             # 8 MiB of the file's bytes, and a sleep: what stays resident once it is loaded.
             bash examples/build-image.sh "$arch" "out/$arch/resident.oke" examples/resident/app.c
+            # Mapping the first touched block succeeds on Windows; its later
+            # sub-64-KiB tail is refused. It must be copied without rewriting
+            # the first read-only mapping (the large-image startup regression).
+            bash examples/build-image.sh "$arch" "out/$arch/mapped-tail.oke" examples/mapped-tail/app.c
+            python3 examples/mapped-tail/check-layout.py "out/$arch/mapped-tail.oke"
+            printf '{"touches":[{"image":"mapped-tail.oke","offset":0}]}\n' > mapped-tail-touch.json
+            "$OKLD" touch "out/$arch/mapped-tail.oke" mapped-tail-touch.json
+            "$OKLD" check "out/$arch/mapped-tail.oke"
             bash examples/build-image.sh "$arch" "out/$arch/prof.oke" examples/prof/app.c
             # AT ITS BASE (0.4.0): every image here is placed by build-image.sh;
             # this one is also left unplaced, its placement note empty.
@@ -114,6 +122,7 @@ jobs:
           # THE OKB: both architectures in one file.
           "$OKLD" bundle out/hello.okb --version 0.1.2 out/x86_64/hello.oke out/aarch64/hello.oke
           "$OKLD" bundle out/resident.okb out/x86_64/resident.oke out/aarch64/resident.oke
+          "$OKLD" bundle out/mapped-tail.okb out/x86_64/mapped-tail.oke out/aarch64/mapped-tail.oke
           "$OKLD" bundle out/needed.okb --entry needed.oke \
             out/x86_64/needed.oke out/x86_64/liboktwice.okso out/aarch64/needed.oke out/aarch64/liboktwice.okso
           # COMPRESSED (okb 2, 0.4.0): the economy form, its images DEFLATE.
@@ -277,6 +286,12 @@ jobs:
           grep -q '"kal_stream_write", "count": ' "$report" || { echo "::error::the calls were not counted"; exit 1; }
           "$OKPROF" report prof | tee okprof.out
           grep -q "openkal.stream" okprof.out || { echo "::error::okprof report did not group the calls by interface"; exit 1; }
+      - name: A refused mapping tail preserves the earlier read-only run
+        run: |
+          set -euo pipefail
+          for image in "out/${{ matrix.arch }}/mapped-tail.oke" out/mapped-tail.okb; do
+            "$OKRUN" "$image" | tr -d '\r' | grep -q '^mapped tail: bytes intact$'
+          done
       - name: At its base (0.4.0)
         run: |
           # Placed where the implementation places memory where it is asked
