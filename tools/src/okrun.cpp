@@ -9,6 +9,10 @@
 //                         separated); the report goes to <dir>/okprof-<id>.json,
 //                         which `okprof report' reads (OKRUN_PROF says the same)
 //
+// `okrun cache [list]' lists what the runner keeps for this machine (0.4: an
+// image's data for this boot's base, snapshots, their markers); `okrun cache gc'
+// removes what was prepared for another boot, and `--all' everything.
+//
 // The image is told its arguments are the image's (or the okb's) name and what
 // follows it. The images it needs are found beside it, in `lib/<arch>/' and
 // `lib/' there, and in OKRUN_PATH.
@@ -18,11 +22,43 @@
 namespace {
 unsigned long length(const char* s) { unsigned long n = 0; while (s && s[n]) ++n; return n; }
 void say(const char* s) { kal_stream_write(kal_stderr(), s, length(s)); }
+void put(const char* s) { kal_stream_write(kal_stdout(), s, length(s)); }
 bool same(const char* a, const char* b) { for (;; ++a, ++b) { if (*a != *b) return false; if (!*a) return true; } }
 int hex(char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
 }  // namespace
 
+// `okrun cache [gc [--all]]': what the runner keeps for this machine (0.4).
+int cache(int argc, char** argv) {
+    auto number = [](unsigned long long v) {
+        char d[24]; int n = 0;
+        do { d[n++] = static_cast<char>('0' + v % 10); v /= 10; } while (v);
+        char out[24]; int k = 0;
+        while (n) out[k++] = d[--n];
+        out[k] = 0;
+        say(out);
+    };
+    if (argc >= 3 && same(argv[2], "gc")) {
+        const bool all = argc >= 4 && same(argv[3], "--all");
+        const unsigned long long bytes = okrun_cache_reclaim(all ? 1 : 0);
+        say("okrun: removed "); number(bytes); say(all ? " bytes, everything the runner keeps\n" : " bytes prepared for another boot\n");
+        return 0;
+    }
+    if (argc >= 3 && !same(argv[2], "list")) { say("usage: okrun cache [list | gc [--all]]\n"); return 2; }
+    const unsigned long long bytes = okrun_cache_list([](const char* name, unsigned long long size, int current, void*) {
+        unsigned long long v = size;
+        char d[24]; int n = 0;
+        do { d[n++] = static_cast<char>('0' + v % 10); v /= 10; } while (v);
+        char out[24]; int k = 0;
+        while (n) out[k++] = d[--n];
+        out[k] = 0;
+        put(out); put("\t"); put(current ? "this boot" : "another boot"); put("\t"); put(name); put("\n");
+    }, nullptr);
+    say("okrun: "); number(bytes); say(" bytes\n");
+    return 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc >= 2 && same(argv[1], "cache")) return cache(argc, argv);
     okrun_options options{};
     static unsigned char keys[16 * 32];
     int i = 1;
@@ -47,7 +83,7 @@ int main(int argc, char** argv) {
     }
     options.trusted = keys;
     if (i >= argc) {
-        say("usage: okrun [--require-signature] [--trust <hex>]... [--debugger] image|okb [arguments...]\n");
+        say("usage: okrun [--require-signature] [--trust <hex>]... [--debugger] [--prof=<what>[:dir]] image|okb [arguments...]\n");
         return 2;
     }
     char why[512];

@@ -5,4 +5,6 @@
 
 namespace okrun {
 const binding* space_bindings(unsigned long& count) { count = 0; return nullptr; }
+kal_uintptr space_props() { return 0; }
+void* space_props_binding() { return nullptr; }
 }  // namespace okrun

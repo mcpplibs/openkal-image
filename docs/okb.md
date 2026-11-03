@@ -17,7 +17,7 @@ them.
 
 | Rule | Statement |
 |---|---|
-| C1 | Every member is **stored** (method 0): its bytes in the archive are its content. |
+| C1 | Every member is **stored** (method 0): its bytes in the archive are its content --- except, in an okb of version 2, an image member, which may be **compressed** (DEFLATE, method 8; §5). |
 | C2 | The bytes of every image member (a name ending in `.oke` or `.okso`) begin at an offset that is a multiple of **65536** from the start of the archive. 65536 is the image's own segment alignment (`-z max-page-size=65536`, SPEC 12.2), so an image's segments can be mapped where they lie. |
 | C3 | No member is encrypted. |
 | C4 | A reader finds members through the central directory only. Bytes that no directory entry names may lie between members. |
@@ -98,8 +98,11 @@ A reader that runs an okb:
 3. selects the architecture of the machine it runs on, and refuses an okb that holds none for
    it, naming the architectures it holds;
 4. admits each member it uses: stored (C1), an image's bytes aligned (C2), and its SHA-256 the
-   one `files` states --- or, where `files` states its chunks, each chunk's (§3). A member that does not hold is refused; a reader does not decompress,
-   realign or copy a member to make it hold;
+   one `files` states --- or, where `files` states its chunks, each chunk's (§3). A member that does not hold is refused; a reader does not
+   realign or copy a stored member to make it hold. A compressed image (okb 2) is expanded once into
+   a file of the reader's own --- okrun's is the user's cache, `okrun/expanded`, named by the
+   manifest's digest and the member --- held to the SHA-256 `files` states, and mapped from there;
+   a later start of the same okb file, whose admission is remembered, maps it again;
 5. resolves the entry and each image an image needs (DT_NEEDED) in this order:
    1. the architecture's directory, then the archive's root;
    2. beside the okb, then its `lib/<arch>/` and `lib/`;
@@ -120,8 +123,8 @@ has no such interface in version 0.17.
 ## 6. Writing
 
 ```
-okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] <image>...
-okld bundle <out.okb> --package <staged-tree> [--sign <seed-file>]
+okld bundle <out.okb> [--name <n>] [--version <v>] [--entry <image>] [--sign <seed-file>] [--compress] <image>...
+okld bundle <out.okb> --package <staged-tree> [--sign <seed-file>] [--compress]
 okld bundle check <file.okb> [--require-signature] [--trust <hex>]...
 ```
 
@@ -129,6 +132,12 @@ okld bundle check <file.okb> [--require-signature] [--trust <hex>]...
 architecture's directory, and writes `okb.json` with the digests; `--sign` signs each image
 and the manifest with one key. The archive is deterministic: no time is recorded, and the same
 images give the same bytes. The entry defaults to the first `.oke` named.
+
+`--compress` stores each image compressed (DEFLATE) and writes an okb of version 2, without the
+images' chunk digests: an okb kept small on disk, which a runner expands into its cache when it
+first runs it --- the economy form of a package (openkal-platform's plugin writes it where the
+package states `[package.metadata.okb] form = "compressed"`). A stored okb is written as version 1,
+which every reader reads.
 
 `--package` takes the images from a universal package that mcpp has staged (mcpp SPEC-014 §4.2,
 §4.5), reading `mcpp-package.json` at the root of the tree:
@@ -143,7 +152,7 @@ Files of every other role (launchers, loaders, resources, metadata) are not memb
 version 1 okb. This is the action of the `okb` package format that openkal-platform's plugin
 provides.
 
-`okld bundle check` verifies C1 to C3, the manifest, every digest, every signature (and the
+`okld bundle check` verifies C1 to C3 (a compressed image expanded and held to its digest), the manifest, every digest, every signature (and the
 trust asked for), that each architecture's entry is present, that each image is of its
 directory's architecture, and that each image follows the convention (SPEC 12.2) with the
 exports of the other images of its directory. It prints one line per violation.
@@ -154,6 +163,7 @@ exports of the other images of its directory. It prints one line per violation.
 |---|---|---|
 | `okld_zip_each`, `okld_zip_find`, `okld_zip_write` | libokld | The ZIP container, read from memory and written into a given buffer. |
 | `okld_okb_read_manifest`, `okld_okb_digest`, `okld_okb_each_file`, `okld_okb_admit` | libokld | The manifest and the admission of a member (§5, step 4). |
+| `okld_okb_expand`, `okld_inflate` | libokld | A compressed member expanded and held to its digest; DEFLATE read (okb 2). |
 | `okrun_run_file`, `okrun_run_bytes` | libokrun | An image or an okb, from a file or from memory. |
 | `okrun_run_okb_bytes` | libokrun | An okb, or an archive of images, from memory, with the entry named or taken from `okb.json`. |
 | `okrun_run_images` | libokrun | A group of images in memory that resolve one another by name. |
@@ -165,3 +175,4 @@ exports of the other images of its directory. It prints one line per violation.
 | 1 | 0.1.2 | This document. |
 | 1 | 0.1.3 | `okld bundle --package`: an okb from a package mcpp staged. |
 | 1 | 0.1.8 | `files.<member>.chunks`: an image's chunk digests, written by `okld bundle`, verified by okrun on several contexts at once and by `okld bundle check` beside the whole digest. Still okb 1: a reader that does not know the key ignores it. |
+| 2 | 0.4.0 | An image member may be compressed (DEFLATE), `okld bundle --compress`; okrun expands it once into its cache and maps it there. An okb whose members are all stored is still written as version 1. |

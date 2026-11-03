@@ -16,6 +16,16 @@
 //     counters   the counters and phases the program registers are kept
 //     perfmap    /tmp/perf-<pid>.map is written, where this system's profiler
 //                (perf) reads the names of an anonymous region's addresses
+//     phases     the moments of the start --- admitted, loaded, its snapshot
+//                entered where it starts from one, initialised, main returned ---
+//                with the time and the page faults to each (0.4)
+//     samples[=hz]  where the program's processor time goes, sampled by the
+//                implementation (openkal 0.23) at hz a second (1000), each
+//                stack named from the images' symbol tables (0.4)
+//     touch      the order in which the program first executes the pages of its
+//                images' instructions, recorded by the implementation, as file
+//                offsets: `okld touch' writes them into an image's touch note,
+//                and `okprof report --order' orders its functions by them (0.4)
 //
 // separated by commas, and `:<directory>' after them receives the report,
 // `okprof-<id>.json' (the working directory otherwise). Unset, an image is bound
@@ -57,7 +67,9 @@ void lock() { while (__atomic_exchange_n(&g_lock, 1, __ATOMIC_ACQUIRE)) kal_task
 void unlock() { __atomic_store_n(&g_lock, 0, __ATOMIC_RELEASE); }
 
 // --- what was asked for ------------------------------------------------------------
-enum : int { asked_active = 1, asked_calls = 2, asked_counters = 4, asked_perfmap = 8 };
+enum : int { asked_active = 1, asked_calls = 2, asked_counters = 4, asked_perfmap = 8,
+             asked_phases = 16, asked_samples = 32, asked_touch = 64 };
+kal_u32 g_sample_rate = 1000;
 int g_mode = -1;                 // -1: not read yet
 char g_dir[512] = {};
 kal_u64 g_started = 0;
@@ -69,6 +81,19 @@ void read_spec(const char* spec, kal_uintptr n) {
         if (contains(spec, n, "calls")) mode |= asked_calls;
         if (contains(spec, n, "counters")) mode |= asked_counters;
         if (contains(spec, n, "perfmap")) mode |= asked_perfmap;
+        if (contains(spec, n, "phases")) mode |= asked_phases;
+        if (contains(spec, n, "touch")) mode |= asked_touch;
+        // `samples', or `samples=<hz>'.
+        for (kal_uintptr i = 0; i + 7 <= n; ++i) {
+            if ((i != 0 && spec[i - 1] != ',') || !same_text(spec + i, 7, "samples")) continue;
+            if (i + 7 < n && spec[i + 7] != ',' && spec[i + 7] != ':' && spec[i + 7] != '=') continue;
+            mode |= asked_samples;
+            if (i + 7 < n && spec[i + 7] == '=') {
+                kal_u32 hz = 0;
+                for (kal_uintptr k = i + 8; k < n && spec[k] >= '0' && spec[k] <= '9'; ++k) hz = hz * 10 + static_cast<kal_u32>(spec[k] - '0');
+                if (hz > 0 && hz <= 10000) g_sample_rate = hz;
+            }
+        }
         if (mode == asked_active) mode |= asked_calls | asked_counters;   // a bare `1'
         for (kal_uintptr i = 0; i < n; ++i)
             if (spec[i] == ':') { copy_text(g_dir, sizeof g_dir, spec + i + 1, n - i - 1); break; }
@@ -341,10 +366,143 @@ void write_perf_map(image_record& r, const void* bytes, kal_u64 size) {
 
 bool g_finished = false;
 
+// --- the phases of a start (0.4) ------------------------------------------------------
+struct moment { const char* name; kal_u64 ns, faults; };
+moment g_moments[16];
+unsigned g_moment_count = 0;
+
+kal_u64 faults_now() {
+    kal_process self{};
+    if (kal_process_self(&self) != kal_ok) return 0;
+    kal_program_info info{};
+    info.self_size = sizeof info;
+    const int e = kal_process_info(self, KAL_PINFO_FAULTS, &info);
+    kal_process_close(self);
+    return e == kal_ok && (info.present & KAL_PINFO_FAULTS) ? info.faults_minor + info.faults_major : 0;
+}
+
+// --- the touches of the images' instructions (0.4) --------------------------------------
+bool g_touching = false;
+
+int touch_module(void* base, const void* phdrs, okld_u32 phnum, const char*, void*) {
+    struct ph { kal_u32 type, flags; kal_u64 offset, vaddr, paddr, filesz, memsz, align; };
+    const auto* p = static_cast<const ph*>(phdrs);
+    const kal_u64 g = kal_exec_granularity();
+    for (okld_u32 k = 0; k < phnum; ++k) {
+        if (p[k].type != 1 || !(p[k].flags & 1)) continue;   // PT_LOAD, PF_X
+        const kal_u64 lo = p[k].vaddr & ~(g - 1), hi = (p[k].vaddr + p[k].memsz + g - 1) & ~(g - 1);
+        if (kal_prof_touch_begin(static_cast<unsigned char*>(base) + lo, hi - lo) == kal_ok) g_touching = true;
+    }
+    return 0;
+}
+
+// The file offset of an address of a loaded image, through its program headers.
+bool file_offset(kal_uintptr address, const char*& image, kal_u64& offset) {
+    okld_module* m = okld_containing(reinterpret_cast<const void*>(address));
+    if (!m) return false;
+    struct find { okld_module* m; const char* name; kal_uintptr address; kal_u64 offset; bool found; };
+    find f{ m, nullptr, address, 0, false };
+    okld_iterate([](void* base, const void* phdrs, okld_u32 phnum, const char* name, void* c) -> int {
+        auto* f = static_cast<find*>(c);
+        if (base != okld_base(f->m)) return 0;
+        struct ph { kal_u32 type, flags; kal_u64 offset, vaddr, paddr, filesz, memsz, align; };
+        const auto* p = static_cast<const ph*>(phdrs);
+        const kal_u64 at = f->address - reinterpret_cast<kal_uintptr>(base);
+        for (okld_u32 k = 0; k < phnum; ++k)
+            if (p[k].type == 1 && at >= p[k].vaddr && at < p[k].vaddr + p[k].filesz) {
+                f->offset = p[k].offset + (at - p[k].vaddr);
+                f->name = name;
+                f->found = true;
+                return 1;
+            }
+        return 1;
+    }, &f);
+    image = f.name;
+    offset = f.offset;
+    return f.found;
+}
+
+// --- samples, as stacks named and counted (0.4) -----------------------------------------
+struct stack_count { kal_u64 hash; kal_u32 count; kal_u32 text; };   // text: offset into the names
+struct folded {
+    stack_count* rows = nullptr; kal_u64 cap = 0, used = 0;
+    out_buffer names;
+    bool grow() {
+        const kal_u64 ncap = cap ? cap * 2 : 4096;
+        auto* n = static_cast<stack_count*>(kal_alloc(ncap * sizeof(stack_count), 16));
+        if (!n) return false;
+        for (kal_u64 i = 0; i < ncap; ++i) n[i] = stack_count{};
+        for (kal_u64 i = 0; i < cap; ++i) {
+            if (!rows[i].count) continue;
+            kal_u64 j = rows[i].hash & (ncap - 1);
+            while (n[j].count) j = (j + 1) & (ncap - 1);
+            n[j] = rows[i];
+        }
+        if (rows) kal_free(rows, cap * sizeof(stack_count), 16);
+        rows = n; cap = ncap;
+        return true;
+    }
+    // The stack's row, counted once more; its text's offset names it.
+    kal_u32 add(const char* stack, kal_uintptr len) {
+        kal_u64 h = 1469598103934665603ull;
+        for (kal_uintptr i = 0; i < len; ++i) { h ^= static_cast<unsigned char>(stack[i]); h *= 1099511628211ull; }
+        if ((used + 1) * 2 > cap && !grow()) return ~0u;
+        kal_u64 j = h & (cap - 1);
+        while (rows[j].count) {
+            if (rows[j].hash == h) { ++rows[j].count; return rows[j].text; }
+            j = (j + 1) & (cap - 1);
+        }
+        rows[j] = stack_count{ h, 1, static_cast<kal_u32>(names.used) };
+        names.put(stack, len);
+        names.put("\0", 1);
+        ++used;
+        return rows[j].text;
+    }
+};
+
+// A frame's name: the image's symbol, the implementation's, or the address.
+void frame_name(kal_uintptr pc, bool innermost, out_buffer& into) {
+    char name[256];
+    kal_uintptr start = 0;
+    const kal_uintptr at = innermost ? pc : pc - 1;
+    kal_intptr n = symbolize(at, name, sizeof name, &start);
+    if (n < 0) n = kal_debug_symbolize(at, name, sizeof name, &start);
+    if (n > 0) into.put(name, static_cast<kal_uintptr>(n) < sizeof name ? static_cast<kal_uintptr>(n) : sizeof name);
+    else { into.put("0x"); into.number(pc, 16); }
+}
+
 }  // namespace
 
 bool profile_active() { return (mode() & asked_active) != 0; }
 bool profile_calls() { return (mode() & asked_calls) != 0; }
+bool profile_samples() { return (mode() & asked_samples) != 0; }
+bool profile_touches() { return (mode() & asked_touch) != 0; }
+
+// WHAT THE RUNNER CHOSE AT EACH POINT A RESOURCE IS SPENT (0.4, mcpp design
+// 2026-11-03 part 4 §16): the placement's data, the snapshot, what is read
+// ahead --- each with its outcome and the bytes it holds.
+struct note { const char* point; const char* outcome; kal_u64 bytes; };
+note g_notes[8];
+unsigned g_note_count = 0;
+
+void profile_note(const char* point, const char* outcome, kal_u64 bytes) {
+    lock();
+    if (g_note_count < 8) g_notes[g_note_count++] = note{ point, outcome, bytes };
+    unlock();
+}
+
+void profile_phase(const char* name) {
+    if (!(mode() & asked_phases)) return;
+    lock();
+    if (g_moment_count < 16) g_moments[g_moment_count++] = moment{ name, kal_time_monotonic() - g_started, faults_now() };
+    unlock();
+}
+
+void profile_begin_run() {
+    const int m = mode();
+    if (m & asked_samples) kal_prof_sample_begin(g_sample_rate);
+    if (m & asked_touch) okld_iterate(&touch_module, nullptr);
+}
 
 void record_call(unsigned long index, kal_u64 ns) {
     if (index >= kProfiledNames) return;
@@ -467,6 +625,8 @@ void profile_finish() {
     b.put(",\n  \"id\": ");
     const kal_u64 id = own_id();
     b.number(id);
+    b.put(",\n  \"started_ns\": ");
+    b.number(g_started);
     b.put(",\n  \"wall_ns\": ");
     b.number(kal_time_monotonic() - g_started);
     b.put(",\n  \"calls\": [");
@@ -501,7 +661,122 @@ void profile_finish() {
         b.put(", \"ns\": "); b.number(g_phases[i].ns);
         b.put(" }");
     }
-    b.put(first ? "]\n}\n" : "\n  ]\n}\n");
+    b.put(first ? "]" : "\n  ]");
+    // THE PHASES OF THE START (0.4).
+    b.put(",\n  \"moments\": [");
+    for (unsigned i = 0; i < g_moment_count; ++i) {
+        b.put(i ? ",\n    { \"name\": " : "\n    { \"name\": ");
+        b.quoted(g_moments[i].name);
+        b.put(", \"ns\": "); b.number(g_moments[i].ns);
+        b.put(", \"faults\": "); b.number(g_moments[i].faults);
+        b.put(" }");
+    }
+    b.put(g_moment_count ? "\n  ]" : "]");
+    // WHAT THE RUNNER CHOSE (0.4).
+    b.put(",\n  \"runner\": [");
+    for (unsigned i = 0; i < g_note_count; ++i) {
+        b.put(i ? ",\n    { \"point\": " : "\n    { \"point\": ");
+        b.quoted(g_notes[i].point);
+        b.put(", \"outcome\": "); b.quoted(g_notes[i].outcome);
+        b.put(", \"bytes\": "); b.number(g_notes[i].bytes);
+        b.put(" }");
+    }
+    b.put(g_note_count ? "\n  ]" : "]");
+    // SAMPLES, AS STACKS (0.4): the outermost frame first, `;' between, as
+    // a folded stack is written.
+    // A TIMELINE beside them: each sample's time, from the start, and its
+    // stack's place in the list --- the input of `okprof report --format=trace'.
+    if (mode() & asked_samples) {
+        kal_prof_sample_end();
+        folded f;
+        static kal_prof_sample batch[256];
+        struct when { kal_u64 ns; kal_u32 text; kal_u64 context; };
+        constexpr kal_u64 kTimeline = 65536;
+        auto* timeline = static_cast<when*>(kal_alloc(kTimeline * sizeof(when), 16));
+        kal_u64 moments = 0;
+        for (;;) {
+            const kal_intptr got = kal_prof_sample_take(batch, 256);
+            if (got <= 0) break;
+            for (kal_intptr i = 0; i < got; ++i) {
+                out_buffer one;
+                for (kal_u32 d = batch[i].depth; d-- > 0;) {
+                    frame_name(batch[i].pc[d], d == 0, one);
+                    if (d) one.put(";");
+                }
+                const kal_u32 text = f.add(one.data, one.used);
+                one.release();
+                if (timeline && moments < kTimeline && text != ~0u)
+                    timeline[moments++] = when{ batch[i].time_ns > g_started ? batch[i].time_ns - g_started : 0, text,
+                                                batch[i].context };
+            }
+        }
+        b.put(",\n  \"rate\": "); b.number(g_sample_rate);
+        b.put(",\n  \"stacks\": [");
+        bool any = false;
+        kal_u64 index = 0;
+        for (kal_u64 i = 0; i < f.cap; ++i) {
+            if (!f.rows[i].count) continue;
+            b.put(any ? ",\n    { \"stack\": " : "\n    { \"stack\": ");
+            any = true;
+            b.quoted(f.names.data + f.rows[i].text);
+            b.put(", \"count\": "); b.number(f.rows[i].count);
+            b.put(" }");
+            f.rows[i].hash = index++;   // its place in the list, for the timeline
+        }
+        b.put(any ? "\n  ]" : "]");
+        // Each stack's text and place, ordered by the text, which a sample
+        // names: the order the texts were made in.
+        struct pair { kal_u32 text; kal_u32 place; };
+        auto* order = static_cast<pair*>(kal_alloc((f.used ? f.used : 1) * sizeof(pair), 16));
+        kal_u64 n = 0;
+        for (kal_u64 i = 0; order && i < f.cap; ++i)
+            if (f.rows[i].count) order[n++] = pair{ f.rows[i].text, static_cast<kal_u32>(f.rows[i].hash) };
+        for (kal_u64 i = 1; i < n; ++i) {   // an insertion sort: the stacks are few beside the samples
+            const pair x = order[i];
+            kal_u64 j = i;
+            while (j > 0 && order[j - 1].text > x.text) { order[j] = order[j - 1]; --j; }
+            order[j] = x;
+        }
+        b.put(",\n  \"timeline\": [");
+        for (kal_u64 k = 0; timeline && order && k < moments; ++k) {
+            kal_u64 lo = 0, hi = n;
+            while (lo + 1 < hi) { const kal_u64 mid = (lo + hi) / 2; if (order[mid].text <= timeline[k].text) lo = mid; else hi = mid; }
+            const kal_u64 place = n ? order[lo].place : 0;
+            b.put(k ? ", [" : "[");
+            b.number(timeline[k].ns); b.put(", "); b.number(place); b.put(", "); b.number(timeline[k].context);
+            b.put("]");
+        }
+        b.put("]");
+        if (order) kal_free(order, (f.used ? f.used : 1) * sizeof(pair), 16);
+        if (timeline) kal_free(timeline, kTimeline * sizeof(when), 16);
+        if (f.rows) kal_free(f.rows, f.cap * sizeof(stack_count), 16);
+        f.names.release();
+    }
+    // TOUCHES (0.4): each image's pages in the order the program first executed
+    // them, as offsets in its file.
+    if ((mode() & asked_touch) && g_touching) {
+        static kal_uintptr pages[4096];
+        b.put(",\n  \"page\": "); b.number(kal_exec_granularity());
+        b.put(",\n  \"touches\": [");
+        bool any = false;
+        for (;;) {
+            const kal_intptr got = kal_prof_touch_take(pages, 4096);
+            if (got <= 0) break;
+            for (kal_intptr i = 0; i < got; ++i) {
+                const char* image = nullptr;
+                kal_u64 offset = 0;
+                if (!file_offset(pages[i], image, offset)) continue;
+                b.put(any ? ",\n    { \"image\": " : "\n    { \"image\": ");
+                any = true;
+                b.quoted(image ? image : "");
+                b.put(", \"offset\": "); b.number(offset);
+                b.put(" }");
+            }
+        }
+        kal_prof_touch_end();
+        b.put(any ? "\n  ]" : "]");
+    }
+    b.put("\n}\n");
     char path[700];
     kal_uintptr at = 0;
     if (g_dir[0]) { copy_text(path, sizeof path - 64, g_dir, length(g_dir)); at = length(path); path[at++] = '/'; }

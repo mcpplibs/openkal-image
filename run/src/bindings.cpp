@@ -102,10 +102,9 @@ OKRUN_IMAGE_ABI kal_intptr own_kal_env_loader(char* out, kal_uintptr cap) {
 // are answered here, and the word of interfaces states them beside the
 // implementation's. The program's end is where a measurement writes what it
 // measured, so `kal_exit' and `kal_abort' pass through here first.
-OKRUN_IMAGE_ABI kal_u64 own_kal_interfaces(void) {
-    return kal_interfaces() | KAL_IFACE_PROF | KAL_IFACE_DEBUG;
-}
+OKRUN_IMAGE_ABI kal_u64 own_kal_interfaces(void) { return own_interfaces(); }
 OKRUN_IMAGE_ABI void own_kal_exit(int status) {
+    profile_phase("exit");
     profile_finish();
     kal_exit(status);
 }
@@ -120,9 +119,44 @@ OKRUN_IMAGE_ABI int own_kal_prof_counter(const char* name, kal_uintptr len, cons
 OKRUN_IMAGE_ABI void own_kal_prof_mark(const char* name, kal_uintptr len, int begin) {
     profile_mark(name, len, begin);
 }
+// AN ADDRESS NAMED: an image's from the symbol table of its file, which this
+// runner read; any other --- the runner's own, the implementation's --- by the
+// implementation (openkal 0.23).
 OKRUN_IMAGE_ABI kal_intptr own_kal_debug_symbolize(kal_uintptr address, char* out, kal_uintptr cap,
                                                    kal_uintptr* start) {
-    return symbolize(address, out, cap, start);
+    const kal_intptr n = symbolize(address, out, cap, start);
+    return n >= 0 ? n : kal_debug_symbolize(address, out, cap, start);
+}
+// WHAT ENDS THE PROGRAM FOR A FAULT, AND WHAT SAMPLES AND TOUCHES, IS THE
+// IMPLEMENTATION'S (openkal 0.23, SPEC 12.3): a fault, a timer and a page's
+// first execution are the environment's to see, and this runner forwards. A
+// measurement of this runner's own that samples or records touches holds them,
+// and the program asking is told kal_err_again.
+OKRUN_IMAGE_ABI kal_uintptr own_kal_debug_props(void) { return kal_debug_props(); }
+OKRUN_IMAGE_ABI kal_uintptr own_kal_prof_props(void) { return kal_prof_props(); }
+OKRUN_IMAGE_ABI int own_kal_prof_sample_begin(kal_u32 per_second) {
+    if (profile_samples()) return kal_err_again;
+    return kal_prof_sample_begin(per_second);
+}
+OKRUN_IMAGE_ABI kal_intptr own_kal_prof_sample_take(kal_prof_sample* out, kal_uintptr count) {
+    if (profile_samples()) return 0;
+    return kal_prof_sample_take(out, count);
+}
+OKRUN_IMAGE_ABI int own_kal_prof_sample_end(void) {
+    if (profile_samples()) return kal_err_invalid;
+    return kal_prof_sample_end();
+}
+OKRUN_IMAGE_ABI int own_kal_prof_touch_begin(const void* at, kal_uintptr size) {
+    if (profile_touches()) return kal_err_again;
+    return kal_prof_touch_begin(at, size);
+}
+OKRUN_IMAGE_ABI kal_intptr own_kal_prof_touch_take(kal_uintptr* out, kal_uintptr count) {
+    if (profile_touches()) return 0;
+    return kal_prof_touch_take(out, count);
+}
+OKRUN_IMAGE_ABI int own_kal_prof_touch_end(void) {
+    if (profile_touches()) return kal_err_invalid;
+    return kal_prof_touch_end();
 }
 
 #define OKRUN_BIND(n, i)     { #n, reinterpret_cast<void*>(&present<&::n>::call) },
@@ -143,6 +177,8 @@ const binding g_counted[] = {
 static_assert(sizeof g_table / sizeof g_table[0] <= kProfiledNames, "the call counts hold every name");
 
 }  // namespace
+
+kal_u64 own_interfaces() { return kal_interfaces() | KAL_IFACE_PROF | KAL_IFACE_DEBUG; }
 
 const binding* bindings(unsigned long& count) {
     count = sizeof g_table / sizeof g_table[0];

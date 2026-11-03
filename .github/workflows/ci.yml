@@ -17,7 +17,8 @@ name: CI
 #              an untrusted key. The okb runs through okrun and from memory; a
 #              program of the system calls an image's library through libokrun
 #              and through the binding openkal-bind generates, and the binding's
-#              refusals hold.
+#              refusals hold. An image at its base, anywhere and unplaced
+#              observes the same memory (0.4.0).
 
 on:
   push:
@@ -74,11 +75,35 @@ jobs:
             # 8 MiB of the file's bytes, and a sleep: what stays resident once it is loaded.
             bash examples/build-image.sh "$arch" "out/$arch/resident.oke" examples/resident/app.c
             bash examples/build-image.sh "$arch" "out/$arch/prof.oke" examples/prof/app.c
+            # AT ITS BASE (0.4.0): every image here is placed by build-image.sh;
+            # this one is also left unplaced, its placement note empty.
+            bash examples/build-image.sh "$arch" "out/$arch/placed.oke" examples/placed/app.c
+            PLACE=0 bash examples/build-image.sh "$arch" "out/$arch/unplaced.oke" examples/placed/app.c
+            # A SNAPSHOT OF THE INITIALISERS (0.4.0): an image whose C library
+            # takes part, and one whose initialiser asks for the time.
+            bash examples/build-image.sh "$arch" "out/$arch/snapshot.oke" examples/snapshot/app.c
+            bash examples/build-image.sh "$arch" "out/$arch/snapshot-timed.oke" examples/snapshot/timed.c
+            "$OKLD" inspect "out/$arch/placed.oke" | awk '$1 == "placement" { sub(",", "", $2); print $2 }' > "out/$arch/placed.base"
+            grep -q '^0x' "out/$arch/placed.base" || { echo "::error::okld place stated no base"; exit 1; }
+            "$OKLD" inspect "out/$arch/unplaced.oke" | grep -q '^placement *none' \
+              || { echo "::error::an image left unplaced states a placement"; exit 1; }
+            # Placed again, the same base and the same bytes.
+            cp "out/$arch/placed.oke" again.oke
+            "$OKLD" place again.oke
+            cmp again.oke "out/$arch/placed.oke" || { echo "::error::placing a placed image changed it"; exit 1; }
+            # A changed byte of a stored segment is refused by the checker.
+            python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[-1]^=1; open(sys.argv[2],'wb').write(d)" \
+              "out/$arch/placed.oke" changed.oke
+            if "$OKLD" check changed.oke 2> changed-placement.txt; then echo "::error::a changed stored segment passed okld check"; exit 1; fi
+            grep -q "SPEC 12.4" changed-placement.txt
           done
           "$OKLD" keygen "$RUNNER_TEMP/seed" > out/key.hex
           for arch in x86_64 aarch64; do
             "$OKLD" sign "out/$arch/signed.oke" "$RUNNER_TEMP/seed"
             "$OKLD" inspect "out/$arch/signed.oke"
+            # The signature is over the stored segments too: placed, then signed.
+            if "$OKLD" place "out/$arch/signed.oke" 2> signed-place.txt; then echo "::error::a signed image was placed"; exit 1; fi
+            grep -q "place it, then sign it" signed-place.txt
             python3 -c "import sys; d=bytearray(open(sys.argv[1],'rb').read()); d[len(d)//2]^=1; open(sys.argv[2],'wb').write(d)" \
               "out/$arch/signed.oke" "out/$arch/tampered.oke"
           done
@@ -87,6 +112,34 @@ jobs:
           "$OKLD" bundle out/resident.okb out/x86_64/resident.oke out/aarch64/resident.oke
           "$OKLD" bundle out/needed.okb --entry needed.oke \
             out/x86_64/needed.oke out/x86_64/liboktwice.okso out/aarch64/needed.oke out/aarch64/liboktwice.okso
+          # COMPRESSED (okb 2, 0.4.0): the economy form, its images DEFLATE.
+          "$OKLD" bundle out/needed-z.okb --compress --entry needed.oke \
+            out/x86_64/needed.oke out/x86_64/liboktwice.okso out/aarch64/needed.oke out/aarch64/liboktwice.okso
+          "$OKLD" bundle check out/needed-z.okb
+          python3 - out/needed-z.okb <<'PY'
+          import json, sys, zipfile
+          z = zipfile.ZipFile(sys.argv[1])
+          assert z.testzip() is None
+          for i in z.infolist():
+              want = 8 if i.filename.endswith(('.oke', '.okso')) else 0
+              assert i.compress_type == want, (i.filename, i.compress_type)
+          assert json.loads(z.read('okb.json'))['okb'] == 2
+          print('  ok  a compressed okb: its images DEFLATE, its manifest stored, version 2')
+          PY
+          python3 - out/needed-z.okb out/tampered-z.okb <<'PY'
+          import sys, zipfile
+          d = bytearray(open(sys.argv[1], 'rb').read())
+          i = zipfile.ZipFile(sys.argv[1]).getinfo('x86_64/liboktwice.okso')
+          import struct
+          n, e = struct.unpack('<HH', d[i.header_offset + 26:i.header_offset + 30])
+          d[i.header_offset + 30 + n + e + i.compress_size // 2] ^= 1
+          i = zipfile.ZipFile(sys.argv[1]).getinfo('aarch64/liboktwice.okso')
+          n, e = struct.unpack('<HH', d[i.header_offset + 26:i.header_offset + 30])
+          d[i.header_offset + 30 + n + e + i.compress_size // 2] ^= 1
+          open(sys.argv[2], 'wb').write(d)
+          PY
+          if "$OKLD" bundle check out/tampered-z.okb 2> tampered-z.txt; then echo "::error::a changed compressed okb passed bundle check"; exit 1; fi
+          cat tampered-z.txt
           "$OKLD" bundle out/signed.okb --sign "$RUNNER_TEMP/seed" --entry needed.oke \
             out/x86_64/needed.oke out/x86_64/liboktwice.okso out/aarch64/needed.oke out/aarch64/liboktwice.okso
           # From a universal package mcpp staged (mcpp-package.json, SPEC-014 §4.5).
@@ -217,6 +270,84 @@ jobs:
           grep -q '"kal_stream_write", "count": ' "$report" || { echo "::error::the calls were not counted"; exit 1; }
           "$OKPROF" report prof | tee okprof.out
           grep -q "openkal.stream" okprof.out || { echo "::error::okprof report did not group the calls by interface"; exit 1; }
+      - name: At its base (0.4.0)
+        run: |
+          # Placed where the implementation places memory where it is asked
+          # (KAL_EXEC_PROP_PLACE): at this boot's base for the image, its data
+          # prepared once for that base in the runner's cache; at the base
+          # `okld place' chose (OKRUN_PLACE=sealed), its relative relocations
+          # already in its bytes. Anywhere (OKRUN_PLACE=0), and an image left
+          # unplaced: relocated. What the image prints is the same.
+          a='${{ matrix.arch }}'
+          base=$(cat "out/$a/placed.base")
+          export OKRUN_CACHE="$RUNNER_TEMP/okplaced"
+          mkdir -p "$OKRUN_CACHE"
+          "$OKRUN" "out/$a/placed.oke" | tr -d '\r' > local.txt
+          "$OKRUN" "out/$a/placed.oke" | tr -d '\r' > again.txt
+          OKRUN_PLACE=sealed "$OKRUN" "out/$a/placed.oke" | tr -d '\r' > placed.txt
+          OKRUN_PLACE=0 "$OKRUN" "out/$a/placed.oke" | tr -d '\r' > anywhere.txt
+          "$OKRUN" "out/$a/unplaced.oke" | tr -d '\r' > unplaced.txt
+          cat local.txt placed.txt anywhere.txt unplaced.txt
+          ls "$OKRUN_CACHE"
+          grep -qx "base $base" placed.txt || { echo "::error::the image was not placed at the base it states ($base)"; exit 1; }
+          if grep -qx "base $base" anywhere.txt; then echo "::error::OKRUN_PLACE=0 placed the image at its base"; exit 1; fi
+          local=$(sed -n 's/^base //p' local.txt)
+          b=$((local))
+          (( b % 65536 == 0 && b >= (1 << 44) && b < (1 << 45) )) \
+            || { echo "::error::this boot's base $local is not one the runner chooses"; exit 1; }
+          grep -qx "base $local" again.txt || { echo "::error::a second start of the boot chose another base"; exit 1; }
+          ls "$OKRUN_CACHE"/*.okseg > /dev/null || { echo "::error::no data was prepared for this boot's base"; exit 1; }
+          for f in local placed anywhere unplaced; do grep -v '^base ' "$f.txt" > "$f.out"; done
+          cmp local.out placed.out && cmp placed.out anywhere.out && cmp placed.out unplaced.out \
+            || { echo "::error::an image at its base observes other memory"; exit 1; }
+          for want in "the table holds its text" "the entry is the implementation's" "written two one"; do
+            grep -q "placed: $want" placed.out || { echo "::error::at its base: $want"; exit 1; }
+          done
+          echo "  ok  an image at its base, anywhere, and unplaced observes the same memory"
+      - name: A snapshot of the initialisers (0.4.0)
+        run: |
+          # The first start runs the initialiser and has a snapshot made beside
+          # it; the next starts from it. A named value the initialiser read,
+          # set otherwise, and OKRUN_SNAPSHOT=0 start by the initialiser again;
+          # an initialiser that asks for the time is refused a snapshot, and the
+          # marker says so.
+          a='${{ matrix.arch }}'
+          export OKRUN_CACHE="$RUNNER_TEMP/okcache"
+          mkdir -p "$OKRUN_CACHE"
+          run() { "$OKRUN" "out/$a/$1.oke" | tr -d '\r'; }
+          expect() { grep -q "$2" <<<"$1" || { echo "::error::$3"; echo "$1"; exit 1; }; }
+          out=$(run snapshot); expect "$out" 'started by its initialisers' 'the first start ran no initialiser'
+          run snapshot-timed > /dev/null
+          for i in $(seq 100); do
+            n=$(cat "$OKRUN_CACHE"/*.sealing 2>/dev/null | grep -c '^made\|^refused' || true)
+            [ "$n" -ge 2 ] && break; sleep 0.1
+          done
+          cat "$OKRUN_CACHE"/*.sealing
+          grep -q '^made' "$OKRUN_CACHE"/*.sealing || { echo "::error::no snapshot was made"; exit 1; }
+          grep -q 'refused: an initialiser asked for kal_time_monotonic' "$OKRUN_CACHE"/*.sealing \
+            || { echo "::error::the initialiser that asked for the time was not refused"; exit 1; }
+          rm -rf snapprof && mkdir snapprof
+          out=$(OKRUN_PROF=phases:snapprof run snapshot); echo "$out"
+          cat snapprof/*.json | tr -d '\r' | sed -n '/"runner"/,/]/p'
+          expect "$out" 'started from the snapshot' 'the second start did not start from the snapshot'
+          expect "$out" 'the memory is filled' 'the snapshot holds other memory'
+          out=$(OKIMG_SNAPSHOT_NAME=set run snapshot)
+          expect "$out" 'started by its initialisers' 'a start whose named value differs used the snapshot'
+          expect "$out" 'the name is set' 'the initialiser read another value'
+          out=$(OKRUN_SNAPSHOT=0 run snapshot); expect "$out" 'started by its initialisers' 'OKRUN_SNAPSHOT=0 used the snapshot'
+          out=$(run snapshot-timed); expect "$out" 'started by its initialisers' 'an image refused a snapshot started from one'
+          echo "  ok  a snapshot is made once, used, compared, declined and refused"
+          # WHAT THE RUNNER KEEPS (0.4.0): listed, and an economy start writes
+          # nothing to it.
+          "$OKRUN" cache | tee cache.txt
+          grep -q '\.oksnap' cache.txt || { echo "::error::okrun cache lists no snapshot"; exit 1; }
+          export OKRUN_CACHE="$RUNNER_TEMP/okcache-economy"
+          mkdir -p "$OKRUN_CACHE"
+          KAL_RESOURCES=economy "$OKRUN" "out/$a/snapshot.oke" > /dev/null
+          sleep 1
+          if ls "$OKRUN_CACHE" | grep -qv '^boot$'; then echo "::error::an economy start wrote to the cache"; ls "$OKRUN_CACHE"; exit 1; fi
+          "$OKRUN" cache gc --all
+          echo "  ok  okrun cache lists what it keeps; an economy start writes nothing"
       - name: The refusals
         run: |
           a='${{ matrix.arch }}'
@@ -254,24 +385,36 @@ jobs:
           OKRUN_PATH="nowhere${sep}${here}/path" "$OKRUN" alone.okb | tr -d '\r' | grep -q "twice(21) = 42" \
             || { echo "::error::OKRUN_PATH"; exit 1; }
           echo "  ok  the okb runs; an unsigned or changed okb is refused; OKRUN_PATH is searched"
+          # COMPRESSED (0.4.0): expanded once into the user's cache, then mapped
+          # from there; a changed byte of it is refused.
+          export XDG_CACHE_HOME="$RUNNER_TEMP/xdg"
+          for i in 1 2; do
+            z=$("$OKRUN" out/needed-z.okb | tr -d '\r')
+            grep -q "twice(21) = 42, next_value() = 41" <<<"$z" || { echo "::error::a compressed okb, start $i"; echo "$z"; exit 1; }
+          done
+          if "$OKRUN" out/tampered-z.okb 2> e7.txt; then echo "::error::a changed compressed okb ran"; exit 1; fi
+          cat e7.txt
+          echo "  ok  a compressed okb runs, expanded once; a changed one is refused"
       - name: What stays resident once an image is loaded (Linux)
         if: runner.os == 'Linux'
         run: |
-          # The runner releases the file it ran once the image is placed: while the
-          # image runs, the process maps neither the image nor the okb, and holds
-          # the 8 MiB segment once, as its copy.
+          # The runner releases its mapping of the file it ran once the image is
+          # placed: while the image runs, what the process maps of the image or
+          # the okb is the segments that are the file's pages (0.3.0), and it
+          # holds the 8 MiB segment once.
           for f in "out/${{ matrix.arch }}/resident.oke" out/resident.okb; do
             "$OKRUN" "$f" > resident.txt & pid=$!
             for i in $(seq 1 50); do grep -q loaded resident.txt 2>/dev/null && break; sleep 0.05; done
             grep -q "resident: loaded" resident.txt || { echo "::error::$f did not start"; exit 1; }
-            mapped=$(grep -c "resident\.ok" "/proc/$pid/maps" || true)
+            maps=$(grep "resident\.ok" "/proc/$pid/maps" || true)
             rss=$(awk '/^Rss:/ {print $2}' "/proc/$pid/smaps_rollup")
             wait "$pid"
-            echo "  $f: mapped $mapped times, $rss KiB resident"
-            [ "$mapped" = 0 ] || { echo "::error::the runner still maps $f while the image runs"; exit 1; }
+            echo "  $f: $rss KiB resident; of the file, mapped:"
+            echo "$maps"
+            if grep -q ' rw-p ' <<<"$maps"; then echo "::error::the runner still holds its mapping of $f while the image runs"; exit 1; fi
             [ "$rss" -lt 14336 ] || { echo "::error::$rss KiB resident for an 8 MiB image: the file's pages beside its copy"; exit 1; }
           done
-          echo "  ok  once loaded, the image is resident once: the file it came from is released"
+          echo "  ok  once loaded, the image is resident once: the runner's mapping of the file is released"
       - name: From memory, and a library from a program of this system (libokrun)
         run: |
           (cd examples/host && mcpp build --release)

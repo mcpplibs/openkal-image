@@ -161,6 +161,60 @@ struct checker {
     okld_report report; void* ctx; int failures = 0;
     void fail(const char* s) { ++failures; if (report) report(s, ctx); }
 };
+
+// Each stored segment against the file: the words a relative relocation
+// writes hold what it computes for the base, and every other word is the
+// file's. Counted rather than copied, since nothing here allocates.
+void verify_placement(const view& v, const placement& p, checker& c) {
+    const bool x86 = v.eh->machine == elf::em_x86_64;
+    const elf::u32 relative = x86 ? elf::r_x86_64_relative : elf::r_aarch64_relative;
+    for (elf::u32 i = 0; i < p.count; ++i) {
+        const auto& e = p.e[i];
+        const elf::u64 file = v.offset_of(e.vaddr);
+        if (file == ~0ull) { c.fail("a placed segment has no bytes in the file"); return; }
+        const unsigned char* was = v.data + file;
+        const unsigned char* now = v.data + e.offset;
+        auto word = [](const unsigned char* b, elf::u64 at) { elf::u64 w = 0; copy(&w, b + at, 8); return w; };
+        auto inside = [&](elf::u64 at) { return at >= e.vaddr && at <= e.vaddr + e.size && e.size - (at - e.vaddr) >= 8; };
+        elf::u64 written = 0, wrong = 0;
+        auto expect = [&](elf::u64 at, elf::u64 value) {
+            if (!inside(at)) return;
+            if (word(was, at - e.vaddr) != value) ++written;
+            if (word(now, at - e.vaddr) != value) ++wrong;
+        };
+        auto table = [&](elf::i64 tag, elf::i64 size_tag) {
+            const auto at = v.offset_of(v.dynamic(tag, ~0ull));
+            const auto n = v.dynamic(size_tag);
+            const auto* r = at == ~0ull ? nullptr : v.at<elf::rela>(at, n / sizeof(elf::rela));
+            for (size k = 0; r && k < n / sizeof(elf::rela); ++k)
+                if (elf::r_type(r[k].info) == relative) expect(r[k].offset, p.base + static_cast<elf::u64>(r[k].addend));
+        };
+        table(elf::dt_rela, elf::dt_relasz);
+        table(elf::dt_jmprel, elf::dt_pltrelsz);
+        const auto relr = v.offset_of(v.dynamic(elf::dt_relr, ~0ull));
+        const auto relr_n = v.dynamic(elf::dt_relrsz) / 8;
+        const auto* rr = relr == ~0ull ? nullptr : v.at<elf::u64>(relr, relr_n);
+        elf::u64 next = 0;
+        for (size k = 0; rr && k < relr_n; ++k) {
+            if ((rr[k] & 1) == 0) {
+                if (inside(rr[k])) expect(rr[k], word(was, rr[k] - e.vaddr) + p.base);
+                next = rr[k] + 8;
+            } else {
+                elf::u64 bits = rr[k] >> 1;
+                for (elf::u64 j = 0; bits; ++j, bits >>= 1)
+                    if ((bits & 1) && inside(next + 8 * j)) expect(next + 8 * j, word(was, next + 8 * j - e.vaddr) + p.base);
+                next += 63 * 8;
+            }
+        }
+        elf::u64 differ = 0;
+        for (elf::u64 at = 0; at + 8 <= e.size; at += 8) if (word(was, at) != word(now, at)) ++differ;
+        for (elf::u64 at = e.size & ~elf::u64{7}; at < e.size; ++at) if (was[at] != now[at]) ++differ;
+        if (wrong != 0 || differ != written) {
+            c.fail("a placed segment is not its file bytes with the relative relocations applied for the base (SPEC 12.4)");
+            return;
+        }
+    }
+}
 }  // namespace
 
 extern "C" int okld_check(const void* bytes, okld_size n, okld_name_test known_kal,
@@ -232,6 +286,31 @@ extern "C" int okld_check(const void* bytes, okld_size n, okld_name_test known_k
         }
     }
 
+    // A PLACEMENT, WHERE ONE IS STATED, DESCRIBES THE IMAGE (SPEC 12.4, type
+    // 3): an entry for each writable segment with bytes in the file, its stored
+    // bytes within the file. What they hold is okld_check_placement's question,
+    // asked when an image is sealed and not on every load.
+    elf::u32 psz = 0;
+    if (const auto* pd = find_note(v, nullptr, placement_note, &psz); pd && psz >= 16) {
+        elf::u32 count = 0;
+        copy(&count, pd + 8, 4);
+        placement p;
+        if (count != 0 && !read_placement(v, p))
+            c.fail("its placement note does not describe its writable segments (SPEC 12.4)");
+    }
+
+    // A TOUCH NOTE, WHERE ONE IS STATED, HOLDS WHAT IT COUNTS; A PREPARED COPY
+    // IS NO IMAGE (SPEC 12.4, types 4 and 5): a loader writes one for itself,
+    // and refuses an image that carries one.
+    elf::u32 tsz = 0;
+    if (const auto* td = find_note(v, nullptr, touch_note, &tsz); td && tsz >= 8) {
+        elf::u32 count = 0;
+        copy(&count, td, 4);
+        if (8 + static_cast<elf::u64>(count) * 8 > tsz) c.fail("its touch note counts more ranges than it holds (SPEC 12.4)");
+    }
+    if (find_note(v, nullptr, prepared_note, nullptr))
+        c.fail("carries a loader's prepared copy (OPENKAL, type 5), which an image as distributed does not (SPEC 12.4)");
+
     elf::u32 sz = 0;
     const auto* req = find_note(v, nullptr, 1, &sz);
     if (!req || sz < 16) c.fail("has no requirements note (OPENKAL, type 1; SPEC 12.4)");
@@ -239,6 +318,16 @@ extern "C" int okld_check(const void* bytes, okld_size n, okld_name_test known_k
         elf::u32 major = 0; copy(&major, req, 4);
         if (major != OKLD_FORMAT_MAJOR) c.fail("its requirements note names another major version of the format (SPEC 12.4)");
     }
+    return c.failures;
+}
+
+extern "C" int okld_check_placement(const void* bytes, okld_size n, okld_report report, void* ctx) {
+    checker c{report, ctx};
+    view v;
+    char why[160];
+    if (!open(bytes, n, v, why, sizeof why)) { c.fail(why); return c.failures; }
+    placement p;
+    if (read_placement(v, p)) verify_placement(v, p, c);
     return c.failures;
 }
 

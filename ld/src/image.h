@@ -68,4 +68,41 @@ bool open(const void* bytes, size n, view& v, char* why, size why_cap);
 // The descriptor of an OPENKAL note of a type, writable when the bytes are.
 unsigned char* find_note(const view& v, unsigned char* writable, elf::u32 type, elf::u32* descsz);
 
+// THE PLACEMENT NOTE (SPEC 12.4, type 3; openkal 0.23): a base, and for each
+// writable loadable segment where its bytes computed for that base lie in the
+// file. Its descriptor: the base, the count and a zero word, then the entries.
+struct placement {
+    struct entry { elf::u64 vaddr = 0, offset = 0, size = 0; };
+    elf::u64 base = 0;
+    elf::u32 count = 0;
+    entry    e[8];
+};
+constexpr elf::u32 placement_note = 3;
+// THE TOUCH NOTE (type 4) and A LOADER'S PREPARED COPY (type 5), version 0.4.
+constexpr elf::u32 touch_note = 4;
+constexpr elf::u32 prepared_note = 5;
+constexpr size     placement_descriptor = 16 + 8 * sizeof(placement::entry);
+
+// The placement an image states, read and held to the image: one entry for
+// each writable loadable segment with bytes in the file, in ascending order of
+// address, its address and its size in the file, its bytes within the file at
+// an offset congruent to its address modulo 65536, and a base that is a
+// multiple of 65536. False when it states none --- its requirements note states
+// a version below 1.1, or its count is zero --- or when what it states does not
+// describe the image.
+bool read_placement(const view& v, placement& out);
+
+// The relative relocations, RELA's and RELR's, that write the segment at
+// `vaddr' of `filesz' bytes, applied for `base' to `seg', which holds the
+// segment's bytes as they are in the file. The relocations that name a symbol
+// are not applied.
+void apply_relative(const view& v, elf::u64 base, unsigned char* seg, elf::u64 vaddr, elf::u64 filesz);
+
+// SHA-256 of `n' bytes with the `hole_n' from `hole' read as zero.
+void sha256_except(const void* bytes, size n, size hole, size hole_n, unsigned char out[32]);
+
+// Whether a relocation names a symbol (it is not a relative one), for the
+// architecture of the image.
+bool names_a_symbol(const view& v, elf::u32 type);
+
 }  // namespace okld
