@@ -106,6 +106,8 @@ sleep suspends the context and whose monotonic granularity is the same at every 
 the wait it suspends with failed at once for a word whose page was not yet present, and an image's
 sleep on macOS was a spin of the processor for its whole length; the granularity was measured at
 each start, and a snapshot compared among the implementation's facts was declined when it differed.
+0.4.2 is built over openkal-macos 0.21.3, whose answers to an initialiser that runs before its own are
+the loader's record of the arguments and the environment.
 
 ## What a start spends
 
