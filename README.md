@@ -14,6 +14,15 @@ architecture that has a runner.
 `libokld` is the loader at run time and `okld` is the tool on the build machine. They share a
 root and differ in role, as `ld.so` and `ld` do.
 
+## Observable process units
+
+Version 0.5.0 binds the four declared-unit operations of OpenKal 0.24 through
+its generated surface and image calling convention. The runner selects Linux
+0.25, macOS 0.22 or Windows 0.20. An image can retain an observation reference;
+missing native identity remains `unknown`. The format and the existing import
+names remain unchanged. CI runs both the new consumer and the existing images
+on every native architecture it covers.
+
 ## An image
 
 ```sh

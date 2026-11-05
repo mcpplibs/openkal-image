@@ -113,3 +113,6 @@ llvm toolchain's clang converts the call.
 | 0.4.2 | No change of its own; released with the archive, whose runner on macOS is built over openkal-macos 0.21.3 (asked before the implementation's initialiser ran, it answers from the loader's record). |
 | 0.4.3 | No change of its own; released with the archive, whose runner on Linux uses openkal-linux 0.24.1 and requires Landlock ABI 3 before claiming confinement of read-only grants. |
 | 0.1.9 | No change of its own; released with the archive, whose runner on macOS is built over openkal-macos 0.17.1 (`kal_task_current` without a system call). |
+
+Version 0.5.0 retains the binding format and selects the OpenKal 0.24 runner.
+The generated runner surface also binds the four process-unit operations.

@@ -3,3 +3,6 @@ compile_commands.json
 mcpp.lock
 examples/bind/mathlib/lib/
 __pycache__/
+
+# Coordinated CI dependency checkouts.
+.ci-deps/
