@@ -436,12 +436,26 @@ struct touched {
     }
 };
 
+// A declined run is copied alone: earlier runs may already be read-only
+// file mappings. Recopying the segment after a later refusal writes those
+// pages (for example, when Windows refuses a final run below 64 KiB).
+int map_or_copy(const okld_host* host, unsigned char* region, elf::u64 lo, elf::u64 hi,
+                const void* bytes, elf::u64 from, int how) {
+    if (host->map(region, lo, hi - lo, bytes, from, how, host->ctx) == 0) return 0;
+    copy(region + lo, static_cast<const unsigned char*>(bytes) + from, hi - lo);
+    if (how & OKLD_MAP_EXECUTE) {
+        if (host->publish(region, lo, hi - lo, host->ctx) != 0) return -1;
+        sync_instructions(region + lo, region + hi);
+    }
+    return 0;
+}
+
 // A segment that is the file's pages: in runs that are read in now and runs
 // that are not, where the image states its touches and the host reads ahead.
 // Runs a few blocks apart are joined: a request costs more than the pages.
 int map_segment(const okld_host* host, unsigned char* region, elf::u64 lo, elf::u64 hi, const void* bytes,
                 elf::u64 from, int how, const touched* t) {
-    if (!t || t->count == 0) return host->map(region, lo, hi - lo, bytes, from, how, host->ctx);
+    if (!t || t->count == 0) return map_or_copy(host, region, lo, hi, bytes, from, how);
     const elf::u64 blocks = (hi - lo + block_size - 1) / block_size;
     auto is_touched = [&](elf::u64 k) { return t->holds((from + k * block_size) / block_size); };
     elf::u64 k = 0;
@@ -459,7 +473,7 @@ int map_segment(const okld_host* host, unsigned char* region, elf::u64 lo, elf::
             break;
         }
         const elf::u64 a = lo + k * block_size, z = e == blocks ? hi : lo + e * block_size;
-        if (host->map(region, a, z - a, bytes, from + k * block_size, how | (on ? OKLD_MAP_PREFETCH : 0), host->ctx) != 0)
+        if (map_or_copy(host, region, a, z, bytes, from + k * block_size, how | (on ? OKLD_MAP_PREFETCH : 0)) != 0)
             return -1;
         k = e;
     }
@@ -613,8 +627,14 @@ int load_image(const void* bytes, okld_size n, const char* name, const okld_host
                 const elf::u64 qlo = round_down(q.vaddr, g), qhi = round_up(q.vaddr + q.memsz, g);
                 if (qlo < hi && lo < qhi) alone = false;
             }
-            if (alone && map_segment(host, m->base, lo, hi, bytes, from, (p.flags & elf::pf_x) ? OKLD_MAP_EXECUTE : 0,
-                                     host->prefetch ? &t : nullptr) == 0) {
+            if (alone) {
+                if (map_segment(host, m->base, lo, hi, bytes, from, (p.flags & elf::pf_x) ? OKLD_MAP_EXECUTE : 0,
+                                host->prefetch ? &t : nullptr) != 0) {
+                    say(why, "the environment refused to make a copied run of the image's instructions executable");
+                    host->release(m->base, m->span, host->ctx);
+                    host->free(m, sizeof *m, host->ctx);
+                    return -1;
+                }
                 mapped[k] = true;
                 continue;
             }
