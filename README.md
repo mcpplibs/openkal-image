@@ -114,6 +114,13 @@ refuses a later run of the same segment, the loader copies only the refused run.
 read-only pages remain intact. A copied executable run is published separately; refusal to publish
 rejects the load. This corrects a startup access violation in profiled images with a short tail.
 
+**Unit memory observation on Linux** (0.4.5): the runner uses openkal-linux 0.24.2,
+which avoids opening RSS records for unrelated process groups. Complete group charges,
+refused-query fallback, immediate observation and the supervised sampling intervals remain.
+
+**Profiling environment** (0.4.5): `okprof record` forwards environment values, including
+empty values, and sets the requested `OKRUN_PROF` value for the child.
+
 **Read-only confinement on Linux** (0.4.3): the runner is built over openkal-linux 0.24.1. It
 claims confinement only with Landlock ABI 3 or later, whose policy can prevent file truncation in
 a read-only grant. Earlier ABIs refuse a confinement request before starting a program. The
