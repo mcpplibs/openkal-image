@@ -22,6 +22,11 @@ its generated surface and image calling convention. The runner selects Linux
 missing native identity remains `unknown`. The format and the existing import
 names remain unchanged.
 
+Version 0.5.1 builds the runner over openkal-macos 0.22.1, whose confinement
+rules hold sixteen long grants, and states the kernel layer as compatible ranges
+(openkal `^0.24.0`, Linux `^0.25.0`, macOS `^0.22.1`, Windows `^0.20.0`). The
+format, the loader and the import names are unchanged.
+
 ## An image
 
 ```sh
