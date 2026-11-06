@@ -108,6 +108,7 @@ llvm toolchain's clang converts the call.
 | 0.3.0 | No change of its own; released with the archive, whose loader maps an image's instructions and read-only data from its file where the implementation can (openkal 0.21, `kal_exec_map_part`). |
 | 0.3.1 | No change of its own; released with the archive, whose runner admits a remembered okb member by its shape without reading it. |
 | 0.3.2 | No change of its own; released with the archive, whose runner is built over openkal 0.22's implementations: a started program is given the system's null device at a position (`KAL_SPAWN_NULL_*`). |
+| 0.5.0 | The binding format is unchanged; the runner selects OpenKal 0.24 and binds its four process-unit operations. |
 | 0.4.0 | No change of its own; released with the archive, whose loader places an image at the base `okld place` chose for it (openkal 0.23, `kal_exec_alloc_at`) and then applies only the relocations that name a symbol. |
 | 0.4.1 | No change of its own; released with the archive, whose runner on macOS is built over openkal-macos 0.21.2 (a sleep is no longer a spin of the processor; the granularity is the same at every start). |
 | 0.4.2 | No change of its own; released with the archive, whose runner on macOS is built over openkal-macos 0.21.3 (asked before the implementation's initialiser ran, it answers from the loader's record). |

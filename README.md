@@ -14,6 +14,14 @@ architecture that has a runner.
 `libokld` is the loader at run time and `okld` is the tool on the build machine. They share a
 root and differ in role, as `ld.so` and `ld` do.
 
+## Observable process units
+
+Version 0.5.0 binds the four declared-unit operations of OpenKal 0.24 through
+its generated surface and image calling convention. The runner selects Linux
+0.25, macOS 0.22 or Windows 0.20. An image can retain an observation reference;
+missing native identity remains `unknown`. The format and the existing import
+names remain unchanged.
+
 ## An image
 
 ```sh
@@ -186,9 +194,18 @@ worker per module no longer reads its 146 MB okb at each start.
 
 An image's instructions and read-only data are its file's pages, so a debugger finds the image
 and its base in the process's mappings, and in a core's. `tools/scripts/okgdb.py` (`ok-symbols`,
-gdb) and `tools/scripts/oklldb.py` (lldb) read them and load the image's symbols at its base; a
-copied image is announced through the GDB JIT interface (`okrun --debugger`). `okld
-debug-split` keeps what only a debugger reads apart from the image, as
+gdb) and `tools/scripts/oklldb.py` (lldb) read them and load the image's symbols at its base.
+`okrun --debugger` announces a debugger object through the GDB JIT interface.
+Source debugging requires embedded DWARF and retained debug relocations
+(`--emit-relocs` at link time). The loader inflates zlib debug sections only in
+that object; the executable image stays unchanged. An image with source debug
+information but no retained debug relocations is refused in debugger mode.
+Ordinary execution is available independently. The checked source-debugger
+combination is Linux x86-64 with the GDB and LLDB bundled in CLion 2026.1.5.2;
+other native debugger combinations are not qualified by the runner matrix.
+See [source debugging](docs/debugging.md) for commands and input limits.
+
+`okld debug-split` keeps what only a debugger reads apart from the image, as
 `.build-id/xx/rest.debug` named by its build-id, where the scripts look for it. A fault the
 implementation reports names the frames from the image's symbols (`kal_debug_symbolize`).
 
@@ -201,6 +218,8 @@ its header and calls it, on openkal and on every other system alike ([docs/bind.
 
 ## What CI asserts
 
+- Linux sanitizer controls check debugger-object metadata bounds and allocation
+  ownership, and dependency-reference rollback after failed debugger registration.
 - Images are built once, on Linux, for x86_64 and AArch64.
 - The same bytes then run on:
   - linux-x86_64 and windows-x86_64 (the x86-64 images);
