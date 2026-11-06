@@ -2,6 +2,7 @@
 // record of what is loaded, for `dl_iterate_phdr', `dladdr' and a debugger.
 #include <okld.h>
 #include "image.h"
+#include "debug_image.h"
 
 namespace {
 
@@ -150,53 +151,47 @@ okld_module* find_loaded(const char* name) {
     return nullptr;
 }
 
-// The relocated copy a debugger reads: the image's bytes with every address
-// moved to where the image is.
-void announce(okld_module* m, const unsigned char* bytes, okld_size n) {
+// A debugger object retains link relocations and describes allocated sections
+// at their actual addresses. The original executable bytes stay unchanged.
+bool announce(okld_module* m, const unsigned char* bytes, okld_size n, okld_why* why) {
     const okld_host* h = m->host;
-    if (!h->debugger || !h->alloc) return;
-    auto* copy_ = static_cast<unsigned char*>(h->alloc(n, h->ctx));
+    if (!h->debugger) return true;
+    void* copy_ = nullptr;
+    okld_size size = 0;
+    if (!debugger_image(bytes, n, reinterpret_cast<elf::u64>(m->base), h, &copy_, &size, why)) return false;
     auto* entry = static_cast<jit_code_entry*>(h->alloc(sizeof(jit_code_entry), h->ctx));
-    if (!copy_ || !entry) return;
-    copy(copy_, bytes, n);
-    const elf::u64 b = reinterpret_cast<elf::u64>(m->base);
-    auto* eh = reinterpret_cast<elf::ehdr*>(copy_);
-    eh->entry += b;
-    auto* ph = reinterpret_cast<elf::phdr*>(copy_ + eh->phoff);
-    for (unsigned i = 0; i < eh->phnum; ++i) { ph[i].vaddr += b; ph[i].paddr += b; }
-    if (eh->shoff && eh->shoff + static_cast<elf::u64>(eh->shnum) * sizeof(elf::shdr) <= n) {
-        auto* sh = reinterpret_cast<elf::shdr*>(copy_ + eh->shoff);
-        for (unsigned i = 0; i < eh->shnum; ++i) {
-            if (sh[i].flags & 2 /* SHF_ALLOC */) sh[i].addr += b;
-            if ((sh[i].type == elf::sht_symtab || sh[i].type == elf::sht_dynsym) && sh[i].offset + sh[i].size <= n) {
-                auto* sym = reinterpret_cast<elf::sym*>(copy_ + sh[i].offset);
-                for (elf::u64 k = 0; k < sh[i].size / sizeof(elf::sym); ++k)
-                    if (sym[k].shndx != elf::shn_undef && sym[k].shndx != elf::shn_abs && sym[k].shndx < 0xff00) sym[k].value += b;
-            }
-        }
+    if (!entry) {
+        h->free(copy_, size, h->ctx);
+        say(why, "no memory for the debugger registration");
+        return false;
     }
     entry->symfile_addr = reinterpret_cast<const char*>(copy_);
-    entry->symfile_size = n;
+    entry->symfile_size = size;
     entry->prev = nullptr;
+    lock();
     entry->next = __jit_debug_descriptor.first_entry;
     if (entry->next) entry->next->prev = entry;
     __jit_debug_descriptor.first_entry = entry;
     __jit_debug_descriptor.relevant_entry = entry;
     __jit_debug_descriptor.action_flag = 1;   // JIT_REGISTER_FN
     __jit_debug_register_code();
+    unlock();
     m->debug_entry = entry;
     m->debug_copy = copy_;
-    m->debug_size = n;
+    m->debug_size = size;
+    return true;
 }
 
 void withdraw(okld_module* m) {
     if (!m->debug_entry) return;
     auto* e = static_cast<jit_code_entry*>(m->debug_entry);
+    lock();
     if (e->prev) e->prev->next = e->next; else __jit_debug_descriptor.first_entry = e->next;
     if (e->next) e->next->prev = e->prev;
     __jit_debug_descriptor.relevant_entry = e;
     __jit_debug_descriptor.action_flag = 2;   // JIT_UNREGISTER_FN
     __jit_debug_register_code();
+    unlock();
     m->host->free(m->debug_copy, m->debug_size, m->host->ctx);
     m->host->free(e, sizeof(jit_code_entry), m->host->ctx);
 }
@@ -733,11 +728,15 @@ int load_image(const void* bytes, okld_size n, const char* name, const okld_host
         sync_instructions(m->base + p.vaddr, m->base + p.vaddr + p.memsz);
     }
 
+    if (!announce(m, static_cast<const unsigned char*>(bytes), n, why)) {
+        for (okld_size k = m->needed_count; k > 0; --k) okld_unload(m->needed[k - 1]);
+        discard(m);
+        return -1;
+    }
     lock();
     m->next = g_modules;
     g_modules = m;
     unlock();
-    announce(m, static_cast<const unsigned char*>(bytes), n);
     *out = m;
     return 0;
 }
