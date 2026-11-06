@@ -254,3 +254,16 @@ its header and calls it, on openkal and on every other system alike ([docs/bind.
 ## License
 
 Apache-2.0
+
+## Symbols in a packaged debugger runner
+
+A debugger locates the runner's JIT registration function and descriptor by
+native symbols. A custom runner or carrier packaged with mcpp retains these
+symbols with `--no-strip` or `[pack] strip = false`. The image's debug profile
+controls its source information independently.
+
+The precompiled-tools workflow preserves native symbols for okrun and checks
+the unpacked Linux x86-64 package with nm, GDB and LLDB source stepping. Other
+hosts retain their native execution smoke checks. A corrective binary candidate
+uses an `asset_revision` filename suffix; its source tag and package version do
+not change. The workflow refuses existing asset names and never replaces them.

@@ -17,6 +17,10 @@ on:
         description: "The openkal-platform whose hosted arrangement builds the tools: the one whose version group holds the implementations the tag pins (0.1.5: 0.19.0; 0.1.6: 0.19.1; 0.1.7: 0.19.2; 0.1.8: 0.20.0; 0.1.9: 0.20.1; 0.3.0: 0.21.0; 0.3.1: 0.21.1; 0.4.2: 0.23.1; 0.4.3 and 0.4.4: 0.23.3)"
         required: true
         default: "0.21.0"
+      asset_revision:
+        description: "Optional safe filename suffix for a corrective binary candidate; source tag/version stay unchanged"
+        required: false
+        default: ""
       mcpp_ref:
         description: "Branch of mcpp-community/mcpp to build with (empty = the released mcpp)"
         required: false
@@ -26,6 +30,8 @@ permissions:
   contents: write
 
 env:
+  RELEASE_TAG: ${{ github.event.inputs.tag }}
+  ASSET_REVISION: ${{ github.event.inputs.asset_revision || '' }}
   MCPP_SOURCE_REF: ${{ github.event.inputs.mcpp_ref || vars.MCPP_SOURCE_REF || '' }}
   # 2026.11.3.1 compiles the std module with the selected platform's flags.
   # mcpp_ref supplies the candidate until this release is installable.
@@ -101,33 +107,60 @@ jobs:
             echo "$(cd "$(dirname "$built")" && pwd)" >> "$GITHUB_PATH"
           fi
 
+      - name: Validate new asset names before packing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MATRIX_ID: ${{ matrix.id }}
+        run: |
+          python=python3; [ "$RUNNER_OS" = Windows ] && python=python
+          "$python" - <<'PY'
+          import json, os, re, subprocess
+          revision = os.environ['ASSET_REVISION']
+          if revision and not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', revision):
+              raise SystemExit('asset_revision must be a safe filename suffix')
+          suffix = '-' + revision if revision else ''
+          tag, system = os.environ['RELEASE_TAG'], os.environ['MATRIX_ID']
+          names = {f'{tool}-{tag}{suffix}-{system}.zip' for tool in ('okrun', 'okld', 'okprof')}
+          if system == 'linux-x86_64':
+              names.add(f'openkal-debugger-scripts-{tag}{suffix}.zip')
+          release = json.loads(subprocess.check_output(['gh', 'release', 'view', tag,
+              '--repo', os.environ['GITHUB_REPOSITORY'], '--json', 'assets'], text=True))
+          if names.intersection(asset['name'] for asset in release['assets']):
+              raise SystemExit('existing assets are immutable; choose a new asset_revision')
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('ASSET_SUFFIX=' + suffix + '\n')
+          PY
+
       - name: okrun, okld and okprof, packed
         working-directory: tools
         run: |
-          tag='${{ github.event.inputs.tag }}'
+          tag="$RELEASE_TAG"
           mkdir -p ../out
           for tool in okrun okld okprof; do
+            strip_args=()
+            # A host debugger discovers the runner through its JIT symbols.
+            if [ "$tool" = okrun ]; then strip_args=(--no-strip); fi
             mcpp pack "$tool" ${{ matrix.pack }} --platform "openkal-platform@$PLATFORM_VERSION" \
-                --pkg-format zip -o "$tool-$tag-${{ matrix.id }}.zip"
-            cp "target/dist/$tool-$tag-${{ matrix.id }}.zip" ../out/
+                "${strip_args[@]}" --pkg-format zip -o "$tool-$tag$ASSET_SUFFIX-${{ matrix.id }}.zip"
+            cp "target/dist/$tool-$tag$ASSET_SUFFIX-${{ matrix.id }}.zip" ../out/
           done
           # The debugger's scripts (okgdb.py, oklldb.py) are the same on every
           # system: one archive, from one row.
           if [ '${{ matrix.id }}' = linux-x86_64 ]; then
-            (cd scripts && zip -q -X "../../out/openkal-debugger-scripts-$tag.zip" okgdb.py oklldb.py okgdb_common.py)
+            (cd scripts && zip -q -X "../../out/openkal-debugger-scripts-$tag$ASSET_SUFFIX.zip" okgdb.py oklldb.py okgdb_common.py)
           fi
           ls -l ../out
 
       - name: Each program runs here, from its package alone
         run: |
           python=python3; [ "$RUNNER_OS" = Windows ] && python=python
-          tag='${{ github.event.inputs.tag }}'
+          tag="$RELEASE_TAG"
           for tool in okrun okld okprof; do
             root="$RUNNER_TEMP/x-$tool"
             # Unpacked as an unzip program does it, each file with the mode the
             # archive states (a program that lost its x bit fails here); the
             # program is the one the package's mcpp-package.json names.
-            exe=$("$python" - "out/$tool-$tag-${{ matrix.id }}.zip" "$root" <<'PY'
+            exe=$("$python" - "out/$tool-$tag$ASSET_SUFFIX-${{ matrix.id }}.zip" "$root" <<'PY'
           import json, os, sys, zipfile
           with zipfile.ZipFile(sys.argv[1]) as z:
               for info in z.infolist():
@@ -141,13 +174,77 @@ jobs:
           PY
             )
             echo "$tool: $exe"
+            echo "PACKAGED_${tool^^}_BIN=$exe" >> "$GITHUB_ENV"
             # Started with no arguments, each says how it is used: it runs.
             "$exe" > "$tool.out" 2>&1 || true
             cat "$tool.out"
             grep -q "usage: $tool" "$tool.out" || { echo "::error::$tool did not run here"; exit 1; }
           done
 
+      - name: Debug the just-unpacked Linux runner
+        if: matrix.id == 'linux-x86_64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gdb lldb
+          work="$RUNNER_TEMP/packaged-runner-jit"
+          mkdir -p "$work"
+          cd "$work"
+          nm --defined-only "$PACKAGED_OKRUN_BIN" > symbols.log
+          grep -Eq ' [Tt] __jit_debug_register_code$' symbols.log
+          grep -Eq ' [BbDd] __jit_debug_descriptor$' symbols.log
+          cat > probe.c <<'C'
+          __attribute__((visibility("default")))
+          int ok_main(void) {
+              volatile int answer = 40;
+              answer += 2;
+              return answer == 42 ? 0 : 2;
+          }
+          C
+          MCPP_PLATFORM="openkal-platform@$PLATFORM_VERSION" mcpp self env --target x86_64-openkal --format json > toolchain.json
+          llvm=$(python3 -c 'import json; from pathlib import Path; print(Path(json.load(open("toolchain.json"))["data"]["toolchain"]["compiler"]).parent)')
+          "$PACKAGED_OKLD_BIN" note-source > note.S
+          "$llvm/clang" --target=x86_64-unknown-none-elf -g -O0 -fPIC -ffreestanding -fno-stack-protector -c probe.c -o probe.o
+          "$llvm/clang" --target=x86_64-unknown-none-elf -fPIC -c note.S -o note.o
+          "$llvm/ld.lld" -shared -e ok_main -z max-page-size=65536 -z now -z noexecstack --hash-style=both \
+            --emit-relocs --compress-debug-sections=zlib -o probe.oke probe.o note.o
+          "$llvm/llvm-objcopy" --remove-section='.rela.*' --remove-section='!.rela.debug_*' \
+            --remove-section='!.rela.dyn' --remove-section='!.rela.plt' probe.oke
+          "$PACKAGED_OKLD_BIN" note probe.oke
+          "$PACKAGED_OKLD_BIN" place probe.oke
+          "$PACKAGED_OKLD_BIN" check probe.oke
+          cat > gdb.commands <<'GDB'
+          set pagination off
+          set confirm off
+          set disable-randomization off
+          set breakpoint pending on
+          break probe.c:4
+          run
+          printf "packaged-before=%d\n", answer
+          next
+          printf "packaged-after=%d\n", answer
+          continue
+          GDB
+          gdb --nx --quiet --batch -x gdb.commands --args "$PACKAGED_OKRUN_BIN" --debugger "$work/probe.oke" > gdb.log 2>&1
+          grep -q '^packaged-before=40$' gdb.log
+          grep -q '^packaged-after=42$' gdb.log
+          grep -q 'exited normally' gdb.log
+          cat > lldb.commands <<'LLDB'
+          settings set target.disable-aslr false
+          settings set plugin.jit-loader.gdb.enable on
+          breakpoint set --file probe.c --line 4
+          run
+          frame variable answer
+          thread step-over
+          frame variable answer
+          continue
+          LLDB
+          lldb --no-lldbinit --batch -s lldb.commands -- "$PACKAGED_OKRUN_BIN" --debugger "$work/probe.oke" > lldb.log 2>&1
+          grep -Eq '^\(volatile int\) answer = 40$' lldb.log
+          grep -Eq '^\(volatile int\) answer = 42$' lldb.log
+          grep -q 'exited with status = 0' lldb.log
+          echo 'packaged runner: JIT symbols and GDB/LLDB source 40 -> 42 passed'
+
       - name: Attached to the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload '${{ github.event.inputs.tag }}' out/* --clobber
+        run: gh release upload "$RELEASE_TAG" out/*
