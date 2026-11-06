@@ -174,7 +174,8 @@ jobs:
           PY
             )
             echo "$tool: $exe"
-            echo "PACKAGED_${tool^^}_BIN=$exe" >> "$GITHUB_ENV"
+            upper=$(printf '%s' "$tool" | tr '[:lower:]' '[:upper:]')
+            echo "PACKAGED_${upper}_BIN=$exe" >> "$GITHUB_ENV"
             # Started with no arguments, each says how it is used: it runs.
             "$exe" > "$tool.out" 2>&1 || true
             cat "$tool.out"
@@ -200,8 +201,19 @@ jobs:
               return answer == 42 ? 0 : 2;
           }
           C
-          MCPP_PLATFORM="openkal-platform@$PLATFORM_VERSION" mcpp self env --target x86_64-openkal --format json > toolchain.json
-          llvm=$(python3 -c 'import json; from pathlib import Path; print(Path(json.load(open("toolchain.json"))["data"]["toolchain"]["compiler"]).parent)')
+          cat > mcpp.toml <<TOML
+          [package]
+          name = "packaged-jit-probe"
+          version = "0.1.0"
+          [target.'cfg(os = "openkal")']
+          platform = "openkal-platform@$PLATFORM_VERSION"
+          [target.'cfg(os = "openkal")'.layers]
+          c-abi = false
+          "c++-abi" = false
+          compiler-runtime = false
+          TOML
+          mcpp self env --target x86_64-openkal --format json > toolchain.json
+          llvm=$(python3 -c 'import json, os; from pathlib import Path; d=json.load(open("toolchain.json"))["data"]; assert d["platform"]["version"] == os.environ["PLATFORM_VERSION"]; print(Path(d["toolchain"]["compiler"]).parent)')
           "$PACKAGED_OKLD_BIN" note-source > note.S
           "$llvm/clang" --target=x86_64-unknown-none-elf -g -O0 -fPIC -ffreestanding -fno-stack-protector -c probe.c -o probe.o
           "$llvm/clang" --target=x86_64-unknown-none-elf -fPIC -c note.S -o note.o
@@ -243,6 +255,17 @@ jobs:
           grep -Eq '^\(volatile int\) answer = 42$' lldb.log
           grep -q 'exited with status = 0' lldb.log
           echo 'packaged runner: JIT symbols and GDB/LLDB source 40 -> 42 passed'
+
+      - name: Logs of the artificial debugger fixture
+        if: always() && matrix.id == 'linux-x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaged-runner-jit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/packaged-runner-jit/gdb.log
+            ${{ runner.temp }}/packaged-runner-jit/lldb.log
+            ${{ runner.temp }}/packaged-runner-jit/symbols.log
+          if-no-files-found: ignore
 
       - name: Attached to the release
         env:
