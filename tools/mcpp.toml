@@ -38,6 +38,11 @@ sources = []
 # (kal_task_start), and Linux and macOS give the main thread 8 MiB; an image's
 # deep recursion on its main thread -- clangd.okb indexing the MSVC headers with
 # `--sync` -- ended in STATUS_STACK_OVERFLOW. The reservation is a thread's
-# default and openkal-windows' guard slack, 8 MiB + 256 KiB.
-[target.windows.build]
+# default and openkal-windows' guard slack, 8 MiB + 256 KiB, spelled for each
+# linker: lld-link on the MSVC ABI (a Windows host), the MinGW driver on the GNU
+# ABI (the hosted arrangement, and a cross build).
+[target.'cfg(all(windows, env = "msvc"))'.build]
+ldflags = ["-Wl,/STACK:8650752"]
+
+[target.'cfg(all(windows, env = "gnu"))'.build]
 ldflags = ["-Wl,--stack,8650752"]
