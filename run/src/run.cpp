@@ -1250,7 +1250,13 @@ void start_making(const local_place& lp) {
 
 using image_function = void (OKRUN_IMAGE_ABI*)(void);
 using image_main = int (OKRUN_IMAGE_ABI*)(void);
-void call_image(void* fn, void*) { reinterpret_cast<image_function>(fn)(); }
+// An initialiser or finaliser, in the image's floating-point state and then the
+// caller's again: a library's are called on a thread of the program that opens it.
+void call_image(void* fn, void*) {
+    const unsigned long long state = okrun_fp_enter();
+    reinterpret_cast<image_function>(fn)();
+    okrun_fp_leave(state);
+}
 
 // --- the runner that makes a snapshot ------------------------------------------------
 
@@ -1607,6 +1613,8 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
         profile_note("snapshot", "not used (OKRUN_SNAPSHOT=0)", 0);
     }
     profile_begin_run();
+    // The image's floating-point state on this thread, from here to its end.
+    okrun_fp_enter();
     if (from_snapshot) {
         // THE SECOND PHASE: the C library takes what this start supplies. A
         // measurement of the start's phases names it.
@@ -1937,6 +1945,9 @@ void free_library(okrun_library* lib) {
 bool has_separator(const char* s) { for (; *s; ++s) if (separator(*s)) return true; return false; }
 
 }  // namespace
+
+extern "C" unsigned long long okrun_call_enter(void) { return okrun_fp_enter(); }
+extern "C" void okrun_call_leave(unsigned long long state) { okrun_fp_leave(state); }
 
 extern "C" okrun_library* okrun_open_library(const char* path, const okrun_options* options,
                                              char* why, unsigned long long cap) {

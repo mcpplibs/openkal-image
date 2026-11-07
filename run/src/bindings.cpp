@@ -43,9 +43,12 @@ struct counted<F, I> {
 using image_entry = void (OKRUN_IMAGE_ABI*)(void*);
 struct box { image_entry fn; void* arg; };
 
+// The context is the image's from its start, in the convention's
+// floating-point state (SPEC 12.2).
 void enter_image(void* p) {
     const box b = *static_cast<box*>(p);
     kal_free(p, sizeof(box), alignof(box));
+    okrun_fp_enter();
     b.fn(b.arg);
 }
 
