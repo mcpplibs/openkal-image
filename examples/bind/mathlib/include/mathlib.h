@@ -21,6 +21,9 @@ double               mathlib_scale(double value, double by);
 struct mathlib_point mathlib_mirror(struct mathlib_point p);
 size_t               mathlib_length(const char* text);
 int32_t              mathlib_each(const int32_t* values, size_t count, mathlib_visit visit, void* context);
+/* Non-zero where the call runs in the convention's floating-point state
+ * (SPEC 12.2): what a C library in the image that computes in long double needs. */
+int32_t              mathlib_conventional_fp(void);
 
 #ifdef __cplusplus
 }

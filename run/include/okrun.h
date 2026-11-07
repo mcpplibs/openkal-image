@@ -95,6 +95,13 @@ void* okrun_symbol(struct okrun_library* library, const char* name);
 /* Runs the library's finalisers and unloads it, and the images it needed that
  * nothing else holds. */
 void  okrun_close(struct okrun_library* library);
+/* A call into a library's function from a thread of this system (0.5.3) is
+ * made in the image's floating-point state (SPEC 12.2), and the caller's is
+ * restored after it: `okrun_call_enter' establishes the image's and returns the
+ * caller's, which `okrun_call_leave' restores. A binding (openkal-bind) makes
+ * each call between the two. */
+unsigned long long okrun_call_enter(void);
+void okrun_call_leave(unsigned long long state);
 
 /* --- a measurement (0.2) --------------------------------------------------- */
 

@@ -34,6 +34,16 @@ thread's default under openkal-windows, as Linux and macOS give the main thread
 8 MiB. The `stack` example recurses through 6 MiB on the main thread on every
 system.
 
+Version 0.5.3 enters an image in its convention's floating-point state (SPEC
+12.2): on x86-64 the x87 control word 0x037F and MXCSR 0x1F80, on AArch64 FPCR
+zero. A thread of Windows begins with the x87 at double precision (0x027F),
+under which a C library that computes in long double read decimal numbers
+otherwise (`strtod("0.4")` gave 0x1.99999999998p-2). The runner establishes the
+state at the entry, around initialisers and finalisers, and in each context the
+image starts; a binding makes each call from a program of the system in it and
+restores the caller's after it (`okrun_call_enter`, `okrun_call_leave`). The
+`fpstate` example and the `bind` example check it on every system.
+
 ## An image
 
 ```sh

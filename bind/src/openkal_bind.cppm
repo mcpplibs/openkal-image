@@ -619,7 +619,14 @@ std::string generate(const declarations& d, const std::string& header_name, cons
         o += std::format("okbind_{0}_r {0}({1}) {{\n", f.name, params);
         o += std::format("    okbind_{0}_t f = (okbind_{0}_t)__atomic_load_n(&okbind_{0}_entry, __ATOMIC_ACQUIRE);\n", f.name);
         o += std::format("    if (!f) {{ f = (okbind_{0}_t)okbind_symbol(\"{0}\"); __atomic_store_n(&okbind_{0}_entry, (void*)f, __ATOMIC_RELEASE); }}\n", f.name);
-        o += std::format("    {}f({});\n}}\n\n", f.ret == "void" ? "" : "return ", args);
+        // In the image's floating-point state, and the caller's again after it (SPEC 12.2).
+        o += "    const unsigned long long okbind_state = okrun_call_enter();\n";
+        if (f.ret == "void") {
+            o += std::format("    f({});\n    okrun_call_leave(okbind_state);\n}}\n\n", args);
+        } else {
+            o += std::format("    okbind_{}_r okbind_r = f({});\n    okrun_call_leave(okbind_state);\n"
+                             "    return okbind_r;\n}}\n\n", f.name, args);
+        }
     }
     // The entries' slots, declared before the functions that use them.
     std::string slots;

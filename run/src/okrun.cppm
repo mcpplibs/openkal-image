@@ -17,6 +17,8 @@ export using ::okrun_open_library;
 export using ::okrun_open_library_bytes;
 export using ::okrun_symbol;
 export using ::okrun_close;
+export using ::okrun_call_enter;
+export using ::okrun_call_leave;
 export using ::okrun_profile;
 export using ::okrun_cache_list;
 export using ::okrun_cache_reclaim;
