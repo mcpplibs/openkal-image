@@ -1,7 +1,7 @@
 [package]
 namespace   = "mcpplibs"
 name        = "openkal-tools"
-version     = "0.5.1"
+version     = "0.5.2"
 description = "okrun, which runs an ok image on this system, and okld, the format's tool on a build machine (check, note, sign, inspect)."
 license     = "Apache-2.0"
 authors     = ["mcpplibs"]
@@ -31,3 +31,13 @@ main = "src/okprof.cpp"
 
 [build]
 sources = []
+
+# THE IMAGE'S MAIN THREAD IS THE RUNNER'S (0.5.2): an image is entered on okrun's
+# main thread, whose stack on Windows is the executable's reservation, 1 MiB by
+# the linker's default. openkal-windows gives every other thread at least 8 MiB
+# (kal_task_start), and Linux and macOS give the main thread 8 MiB; an image's
+# deep recursion on its main thread -- clangd.okb indexing the MSVC headers with
+# `--sync` -- ended in STATUS_STACK_OVERFLOW. The reservation is a thread's
+# default and openkal-windows' guard slack, 8 MiB + 256 KiB.
+[target.windows.build]
+ldflags = ["-Wl,--stack,8650752"]

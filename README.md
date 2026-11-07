@@ -27,6 +27,13 @@ rules hold sixteen long grants, and states the kernel layer as compatible ranges
 (openkal `^0.24.0`, Linux `^0.25.0`, macOS `^0.22.1`, Windows `^0.20.0`). The
 format, the loader and the import names are unchanged.
 
+Version 0.5.2 gives an image's main thread a thread's stack on Windows. An image
+is entered on okrun's main thread, whose stack there is the executable's
+reservation, the linker's 1 MiB; okrun.exe now reserves 8 MiB + 256 KiB, a
+thread's default under openkal-windows, as Linux and macOS give the main thread
+8 MiB. The `stack` example recurses through 6 MiB on the main thread on every
+system.
+
 ## An image
 
 ```sh
