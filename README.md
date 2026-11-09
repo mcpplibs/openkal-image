@@ -44,6 +44,14 @@ image starts; a binding makes each call from a program of the system in it and
 restores the caller's after it (`okrun_call_enter`, `okrun_call_leave`). The
 `fpstate` example and the `bind` example check it on every system.
 
+Version 0.5.4 states the implementation of openkal the runner binds as a
+capability with a default per system rather than a dependency per system:
+`requires = ["mcpp:kernel-abi=openkal"]` with `[defaults."mcpp:kernel-abi=openkal"]`
+naming openkal-linux, openkal-macos and openkal-windows (mcpp 2026.11.9.1). An
+implementation the graph already has --- the consumer's own, or the one its
+platform adds, such as openkal-posix on another system --- is the one bound,
+without a patch of this package.
+
 ## An image
 
 ```sh
