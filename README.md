@@ -52,6 +52,12 @@ implementation the graph already has --- the consumer's own, or the one its
 platform adds, such as openkal-posix on another system --- is the one bound,
 without a patch of this package.
 
+Version 0.5.5 is built against the openkal 0.25 family: openkal 0.25.0 and, as
+the defaults per system, openkal-linux 0.26.0, openkal-macos 0.23.0 and
+openkal-windows 0.21.0. The names the runner binds are generated from the
+specification's SURFACE.txt, so the names 0.25 adds (`kal_fs_hard_link`,
+among others) are bound without a change of the runner's sources.
+
 ## An image
 
 ```sh

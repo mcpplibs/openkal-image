@@ -1,7 +1,7 @@
 [package]
 namespace   = "mcpplibs"
 name        = "openkal-run"
-version     = "0.5.4"
+version     = "0.5.5"
 description = "libokrun: the runner's core --- an ok image's names bound to this process's one openkal implementation, in the image's calling convention, and its entry entered."
 license     = "Apache-2.0"
 authors     = ["mcpplibs"]
@@ -17,13 +17,13 @@ requires    = ["mcpp:kernel-abi=openkal"]
 kind = "lib"
 
 [dependencies]
-openkal = "^0.24.0"
+openkal = "^0.25.0"
 openkal-ld = { path = "../ld" }
 
 [defaults."mcpp:kernel-abi=openkal"]
-linux   = "openkal-linux@^0.25.0"
-macos   = "openkal-macos@^0.22.1"
-windows = "openkal-windows@^0.20.0"
+linux   = "openkal-linux@^0.26.0"
+macos   = "openkal-macos@^0.23.0"
+windows = "openkal-windows@^0.21.0"
 
 # The interfaces each system's implementation provides decide one unit: where
 # openkal.space is provided its names are bound, and elsewhere an image that
