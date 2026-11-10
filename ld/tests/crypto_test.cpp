@@ -5,18 +5,21 @@
 #include <cstring>
 #include <okld.h>
 
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
+
 extern "C" void okld_sha512_for_test(const void*, okld_size, unsigned char[64]);
 extern "C" void okld_ed25519_sign_for_test(const unsigned char[32], const void*, okld_size, unsigned char[64]);
 
 namespace {
-int failures = 0;
 void bytes(const char* hex, unsigned char* out) {
     for (std::size_t i = 0; hex[2 * i]; ++i) { unsigned v; std::sscanf(hex + 2 * i, "%2x", &v); out[i] = static_cast<unsigned char>(v); }
 }
-void check(bool held, const char* what) { std::printf("  %s  %s\n", held ? "held" : "FAIL", what); if (!held) ++failures; }
+void check(bool held, const char* what) { expect(held) << what; }
 }
 
-int main() {
+UTest crypto_test{"crypto", [] {
     unsigned char h[64], want[64];
     okld_sha512_for_test("abc", 3, h);
     bytes("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f", want);
@@ -42,5 +45,4 @@ int main() {
         okld_ed25519_sign_for_test(seed, msg, std::strlen(t.msg) / 2, sig);
         check(std::memcmp(sig, want_sig, 64) == 0, "an Ed25519 signature is RFC 8032's");
     }
-    return failures;
-}
+}};

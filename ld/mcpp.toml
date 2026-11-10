@@ -10,6 +10,10 @@ repo        = "https://github.com/mcpplibs/openkal-image"
 [targets.okld]
 kind = "lib"
 
+# The library's tests (tests/), on the mtest library.
+[dev-dependencies]
+mcpplibs.mtest = "0.5.2"
+
 [build]
 sources = ["src/*.cppm", "src/*.cpp"]
 include_dirs = ["include"]
