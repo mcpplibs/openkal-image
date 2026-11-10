@@ -1,13 +1,14 @@
 [package]
 namespace   = "mcpplibs"
 name        = "openkal-run"
-version     = "0.5.5"
+version     = "0.6.0"
 description = "libokrun: the runner's core --- an ok image's names bound to this process's one openkal implementation, in the image's calling convention, and its entry entered."
 license     = "Apache-2.0"
 authors     = ["mcpplibs"]
 repo        = "https://github.com/mcpplibs/openkal-image"
-# `[defaults]' (mcpp 2026.11.9.1, SPEC-002 §3.7).
-mcpp        = ">=2026.11.9.1"
+# `[defaults]' (mcpp 2026.11.9.1, SPEC-002 §3.7); the implementation's
+# interfaces read by build.mcpp (MCPP_KERNEL_ABI_INTERFACES, 2026.11.10.1).
+mcpp        = ">=2026.11.10.1"
 # The runner binds an image's names to this process's one implementation of
 # openkal: whichever the graph has --- the consumer's, or the one its
 # platform adds --- else the default of the system below.
@@ -25,21 +26,22 @@ linux   = "openkal-linux@^0.26.0"
 macos   = "openkal-macos@^0.23.0"
 windows = "openkal-windows@^0.21.0"
 
-# The interfaces each system's implementation provides decide one unit: where
-# openkal.space is provided its names are bound, and elsewhere an image that
-# requires it is refused at load, naming it.
+# THE INTERFACES THE RUNNER ITSELF CALLS (0.6): an implementation that does not
+# provide one of them is refused when the graph is resolved. Every other
+# interface is bound where the implementation provides it (build.mcpp reads
+# its `provides-interfaces'), and an image that requires one it does not is
+# refused at load, naming it (SPEC 12.4). An implementation that states no list
+# is taken to provide every interface.
+[kernel-abi]
+requires-interfaces = [
+    "openkal.abort", "openkal.stream", "openkal.memory", "openkal.env", "openkal.time",
+    "openkal.random", "openkal.fs", "openkal.process", "openkal.task", "openkal.exec",
+    "openkal.map",
+]
+
 [build]
 sources = ["src/okrun.cppm", "src/run.cpp", "src/bindings.cpp", "src/seal.cpp", "src/prof.cpp"]
 include_dirs = ["include"]
 flags = [
   { glob = "src/*.cpp", cxxflags = ["-fno-exceptions", "-fno-rtti"] },
 ]
-
-[target.linux.build]
-sources = ["src/bindings_space.cpp"]
-
-[target.macos.build]
-sources = ["src/bindings_space.cpp"]
-
-[target.windows.build]
-sources = ["src/no_space.cpp"]

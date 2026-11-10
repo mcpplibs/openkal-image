@@ -1,6 +1,9 @@
 #pragma once
 #include <openkal/types.h>
 #include <openkal/fs.h>
+#include <openkal/prof.h>
+// OKRUN_HAS_<INTERFACE> and OKRUN_COMPILED_INTERFACES (build.mcpp, 0.6).
+#include "provided.inc"
 
 namespace okrun {
 
@@ -55,14 +58,28 @@ kal_intptr symbolize(kal_uintptr address, char* out, kal_uintptr cap, kal_uintpt
 // A name as openkal names things: the supplied directory that is the longest
 // prefix of it, and the rest (src/run.cpp).
 bool locate_path(const char* path, kal_dir& dir, const char*& rest);
+// openkal.space's names, each with a null address where the implementation
+// does not provide the interface (src/bindings.cpp).
 const binding* space_bindings(unsigned long& count);
 // openkal.space's word of properties and its binding where it is bound; zero
-// and null where it is not (src/bindings_space.cpp, src/no_space.cpp).
+// and null where it is not.
 kal_uintptr space_props();
 void* space_props_binding();
-// The word of interfaces an image is told: the implementation's, and the
-// loader's own (openkal.prof, openkal.debug; SPEC 12.3).
+// The word of interfaces an image is told: the implementation's that this
+// runner binds, and the loader's own (openkal.prof, openkal.debug; SPEC 12.3).
 kal_u64 own_interfaces();
+// THE IMPLEMENTATION'S openkal.prof AND openkal.debug, where it provides them
+// (src/prof.cpp, 0.6). Elsewhere the properties are empty, a request is
+// kal_err_not_supported and an address is named by the images alone.
+kal_uintptr impl_prof_props();
+int impl_prof_sample_begin(kal_u32 per_second);
+kal_intptr impl_prof_sample_take(kal_prof_sample* out, kal_uintptr count);
+int impl_prof_sample_end();
+int impl_prof_touch_begin(const void* at, kal_uintptr size);
+kal_intptr impl_prof_touch_take(kal_uintptr* out, kal_uintptr count);
+int impl_prof_touch_end();
+kal_uintptr impl_debug_props();
+kal_intptr impl_debug_symbolize(kal_uintptr address, char* out, kal_uintptr cap, kal_uintptr* start);
 
 // --- a snapshot of an image's initialisers (0.4, src/seal.cpp) ---------------
 //

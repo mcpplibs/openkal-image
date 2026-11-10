@@ -37,6 +37,37 @@
 extern "C" void okrun_profile(const char* spec);
 
 namespace okrun {
+
+// THE IMPLEMENTATION'S MEASUREMENT AND NAMES (openkal.prof, openkal.debug),
+// referred to only where it provides them (0.6): an implementation without
+// them is not asked to define a name it does not have (SPEC 6.1).
+#if OKRUN_HAS_PROF
+kal_uintptr impl_prof_props() { return kal_prof_props(); }
+int impl_prof_sample_begin(kal_u32 per_second) { return kal_prof_sample_begin(per_second); }
+kal_intptr impl_prof_sample_take(kal_prof_sample* out, kal_uintptr count) { return kal_prof_sample_take(out, count); }
+int impl_prof_sample_end() { return kal_prof_sample_end(); }
+int impl_prof_touch_begin(const void* at, kal_uintptr size) { return kal_prof_touch_begin(at, size); }
+kal_intptr impl_prof_touch_take(kal_uintptr* out, kal_uintptr count) { return kal_prof_touch_take(out, count); }
+int impl_prof_touch_end() { return kal_prof_touch_end(); }
+#else
+kal_uintptr impl_prof_props() { return 0; }
+int impl_prof_sample_begin(kal_u32) { return kal_err_not_supported; }
+kal_intptr impl_prof_sample_take(kal_prof_sample*, kal_uintptr) { return 0; }
+int impl_prof_sample_end() { return kal_err_invalid; }
+int impl_prof_touch_begin(const void*, kal_uintptr) { return kal_err_not_supported; }
+kal_intptr impl_prof_touch_take(kal_uintptr*, kal_uintptr) { return 0; }
+int impl_prof_touch_end() { return kal_err_invalid; }
+#endif
+#if OKRUN_HAS_DEBUG
+kal_uintptr impl_debug_props() { return kal_debug_props(); }
+kal_intptr impl_debug_symbolize(kal_uintptr address, char* out, kal_uintptr cap, kal_uintptr* start) {
+    return kal_debug_symbolize(address, out, cap, start);
+}
+#else
+kal_uintptr impl_debug_props() { return 0; }
+kal_intptr impl_debug_symbolize(kal_uintptr, char*, kal_uintptr, kal_uintptr*) { return -kal_err_not_found; }
+#endif
+
 namespace {
 
 kal_uintptr length(const char* s) { kal_uintptr n = 0; while (s && s[n]) ++n; return n; }
@@ -391,7 +422,7 @@ int touch_module(void* base, const void* phdrs, okld_u32 phnum, const char*, voi
     for (okld_u32 k = 0; k < phnum; ++k) {
         if (p[k].type != 1 || !(p[k].flags & 1)) continue;   // PT_LOAD, PF_X
         const kal_u64 lo = p[k].vaddr & ~(g - 1), hi = (p[k].vaddr + p[k].memsz + g - 1) & ~(g - 1);
-        if (kal_prof_touch_begin(static_cast<unsigned char*>(base) + lo, hi - lo) == kal_ok) g_touching = true;
+        if (impl_prof_touch_begin(static_cast<unsigned char*>(base) + lo, hi - lo) == kal_ok) g_touching = true;
     }
     return 0;
 }
@@ -466,7 +497,7 @@ void frame_name(kal_uintptr pc, bool innermost, out_buffer& into) {
     kal_uintptr start = 0;
     const kal_uintptr at = innermost ? pc : pc - 1;
     kal_intptr n = symbolize(at, name, sizeof name, &start);
-    if (n < 0) n = kal_debug_symbolize(at, name, sizeof name, &start);
+    if (n < 0) n = impl_debug_symbolize(at, name, sizeof name, &start);
     if (n > 0) into.put(name, static_cast<kal_uintptr>(n) < sizeof name ? static_cast<kal_uintptr>(n) : sizeof name);
     else { into.put("0x"); into.number(pc, 16); }
 }
@@ -500,7 +531,7 @@ void profile_phase(const char* name) {
 
 void profile_begin_run() {
     const int m = mode();
-    if (m & asked_samples) kal_prof_sample_begin(g_sample_rate);
+    if (m & asked_samples) impl_prof_sample_begin(g_sample_rate);
     if (m & asked_touch) okld_iterate(&touch_module, nullptr);
 }
 
@@ -687,7 +718,7 @@ void profile_finish() {
     // A TIMELINE beside them: each sample's time, from the start, and its
     // stack's place in the list --- the input of `okprof report --format=trace'.
     if (mode() & asked_samples) {
-        kal_prof_sample_end();
+        impl_prof_sample_end();
         folded f;
         static kal_prof_sample batch[256];
         struct when { kal_u64 ns; kal_u32 text; kal_u64 context; };
@@ -695,7 +726,7 @@ void profile_finish() {
         auto* timeline = static_cast<when*>(kal_alloc(kTimeline * sizeof(when), 16));
         kal_u64 moments = 0;
         for (;;) {
-            const kal_intptr got = kal_prof_sample_take(batch, 256);
+            const kal_intptr got = impl_prof_sample_take(batch, 256);
             if (got <= 0) break;
             for (kal_intptr i = 0; i < got; ++i) {
                 out_buffer one;
@@ -760,7 +791,7 @@ void profile_finish() {
         b.put(",\n  \"touches\": [");
         bool any = false;
         for (;;) {
-            const kal_intptr got = kal_prof_touch_take(pages, 4096);
+            const kal_intptr got = impl_prof_touch_take(pages, 4096);
             if (got <= 0) break;
             for (kal_intptr i = 0; i < got; ++i) {
                 const char* image = nullptr;
@@ -773,7 +804,7 @@ void profile_finish() {
                 b.put(" }");
             }
         }
-        kal_prof_touch_end();
+        impl_prof_touch_end();
         b.put(any ? "\n  ]" : "]");
     }
     b.put("\n}\n");

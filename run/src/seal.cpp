@@ -171,6 +171,17 @@ template <auto F> struct fact;
 template <class R, class... A, R (*F)(A...)>
 struct fact<F> { OKRUN_IMAGE_ABI static R call(A... a) { return F(a...); } };
 
+// A FACT OF AN INTERFACE THIS RUNNER DOES NOT BIND IS ZERO (0.6), as an
+// implementation without the property answers, and names nothing of it.
+#define OKRUN_FACT_OF(has, type, n) OKRUN_FACT_OF_(has, type, n)
+#define OKRUN_FACT_OF_(has, type, n) OKRUN_FACT_##has(type, n)
+#define OKRUN_FACT_1(type, n) OKRUN_IMAGE_ABI type fact_##n(void) { return ::n(); }
+#define OKRUN_FACT_0(type, n) OKRUN_IMAGE_ABI type fact_##n(void) { return 0; }
+OKRUN_FACT_OF(OKRUN_HAS_REGION, kal_uintptr, kal_region_props)
+OKRUN_FACT_OF(OKRUN_HAS_TIMEOUT, kal_u64, kal_timeout_granularity)
+OKRUN_FACT_OF(OKRUN_HAS_NET, kal_uintptr, kal_net_props)
+OKRUN_FACT_OF(OKRUN_HAS_DATAGRAM, kal_uintptr, kal_datagram_props)
+
 // Every other name: the snapshot is refused, naming it.
 binding g_names[512];
 unsigned long g_count = 0;
@@ -188,6 +199,7 @@ template <unsigned long I> OKRUN_IMAGE_ABI void refuse() { asked(g_names[I].name
 #define OKRUN_BIND(n, i)     { #n, reinterpret_cast<void*>(&refuse<i>) },
 #define OKRUN_OWN(n, i)      OKRUN_BIND(n, i)
 #define OKRUN_CALLBACK(n, i) OKRUN_BIND(n, i)
+#define OKRUN_ABSENT(n, i)   OKRUN_BIND(n, i)
 const binding g_main[] = {
 #include "surface.inc"
 };
@@ -220,17 +232,17 @@ const binding g_allowed[] = {
     { "kal_memory_granularity", reinterpret_cast<void*>(&fact<&::kal_memory_granularity>::call) },
     { "kal_exec_granularity",   reinterpret_cast<void*>(&fact<&::kal_exec_granularity>::call) },
     { "kal_exec_props",         reinterpret_cast<void*>(&fact<&::kal_exec_props>::call) },
-    { "kal_region_props",       reinterpret_cast<void*>(&fact<&::kal_region_props>::call) },
+    { "kal_region_props",       reinterpret_cast<void*>(&fact_kal_region_props) },
     { "kal_time_props",         reinterpret_cast<void*>(&fact<&::kal_time_props>::call) },
     { "kal_time_monotonic_granularity", reinterpret_cast<void*>(&fact<&::kal_time_monotonic_granularity>::call) },
-    { "kal_timeout_granularity", reinterpret_cast<void*>(&fact<&::kal_timeout_granularity>::call) },
+    { "kal_timeout_granularity", reinterpret_cast<void*>(&fact_kal_timeout_granularity) },
     { "kal_random_props",       reinterpret_cast<void*>(&fact<&::kal_random_props>::call) },
     { "kal_process_props",      reinterpret_cast<void*>(&fact<&::kal_process_props>::call) },
     { "kal_task_props",         reinterpret_cast<void*>(&fact<&::kal_task_props>::call) },
-    { "kal_net_props",          reinterpret_cast<void*>(&fact<&::kal_net_props>::call) },
-    { "kal_datagram_props",     reinterpret_cast<void*>(&fact<&::kal_datagram_props>::call) },
-    { "kal_prof_props",         reinterpret_cast<void*>(&fact<&::kal_prof_props>::call) },
-    { "kal_debug_props",        reinterpret_cast<void*>(&fact<&::kal_debug_props>::call) },
+    { "kal_net_props",          reinterpret_cast<void*>(&fact_kal_net_props) },
+    { "kal_datagram_props",     reinterpret_cast<void*>(&fact_kal_datagram_props) },
+    { "kal_prof_props",         reinterpret_cast<void*>(&fact<&impl_prof_props>::call) },
+    { "kal_debug_props",        reinterpret_cast<void*>(&fact<&impl_debug_props>::call) },
     { "kal_fs_max_name",        reinterpret_cast<void*>(&fact<&::kal_fs_max_name>::call) },
     { "kal_env_system",         reinterpret_cast<void*>(&fact<&::kal_env_system>::call) },
 };
@@ -238,8 +250,7 @@ const binding g_allowed[] = {
 void fill_names() {
     if (g_count) return;
     for (const binding& b : g_main) g_names[g_count++] = b;
-    unsigned long space = 0;
-    if (space_bindings(space) && space)
+    if (OKRUN_HAS_SPACE)
         for (const binding& b : g_space) g_names[g_count++] = b;
     for (const binding& a : g_allowed)
         for (unsigned long i = 0; i < g_count; ++i)
@@ -345,17 +356,17 @@ kal_u32 environment_facts(kal_u64 asked) {
     f.word(kal_memory_granularity());
     f.word(kal_exec_granularity());
     f.word(kal_exec_props());
-    f.word(kal_region_props());
+    f.word(fact_kal_region_props());
     f.word(kal_time_props());
     f.word(kal_time_monotonic_granularity());
-    f.word(kal_timeout_granularity());
+    f.word(fact_kal_timeout_granularity());
     f.word(kal_random_props());
     f.word(kal_process_props());
     f.word(kal_task_props());
-    f.word(kal_net_props());
-    f.word(kal_datagram_props());
-    f.word(kal_prof_props());
-    f.word(kal_debug_props());
+    f.word(fact_kal_net_props());
+    f.word(fact_kal_datagram_props());
+    f.word(impl_prof_props());
+    f.word(impl_debug_props());
     f.word(kal_fs_max_name());
     f.word(space_props());
     f.word(asked);

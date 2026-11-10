@@ -126,7 +126,9 @@ unsigned long long okrun_cache_list(void (*each)(const char* name, unsigned long
  * bytes removed. */
 unsigned long long okrun_cache_reclaim(int all);
 
-/* The names this runner binds (the specification's surface), `count' of them. */
+/* The specification's surface: every name an image may import, `count' of
+ * them, whether or not this system's implementation provides its interface
+ * (okrun_resolve answers which are bound). */
 const char* const* okrun_names(unsigned long* count);
 
 /* The address an image's import of `name' is bound to, in the image's

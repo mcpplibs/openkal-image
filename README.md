@@ -52,11 +52,22 @@ implementation the graph already has --- the consumer's own, or the one its
 platform adds, such as openkal-posix on another system --- is the one bound,
 without a patch of this package.
 
-Version 0.5.5 is built against the openkal 0.25 family: openkal 0.25.0 and, as
-the defaults per system, openkal-linux 0.26.0, openkal-macos 0.23.0 and
-openkal-windows 0.21.0. The names the runner binds are generated from the
-specification's SURFACE.txt, so the names 0.25 adds (`kal_fs_hard_link`,
-among others) are bound without a change of the runner's sources.
+Version 0.6.0 binds the interfaces the implementation provides, which it reads
+when it is built (mcpp 2026.11.10.1, `MCPP_KERNEL_ABI_INTERFACES`): the
+implementation's `provides-interfaces`. A name of any other interface is listed
+without an address, the runner refers to nothing of that interface, and an image
+that requires it is refused at load, naming it (SPEC 12.4). The word of
+interfaces an image is told is the implementation's answer intersected with the
+interfaces bound, together with the loader's own. An implementation that states
+no list is taken to provide every interface. The interfaces the runner calls
+itself are stated as `[kernel-abi] requires-interfaces`, so an implementation
+without one of them is refused when the graph is resolved. No source file is
+chosen per system any more: an implementation that provides part of the surface,
+on any system, needs no function it does not have. The names the runner binds are
+generated from the specification's SURFACE.txt, so the names 0.25 adds
+(`kal_fs_hard_link`, among others) are bound without a change of the runner's
+sources. The package follows openkal 0.25 (openkal-linux 0.26, openkal-macos
+0.23, openkal-windows 0.21).
 
 ## An image
 

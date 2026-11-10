@@ -33,9 +33,9 @@ env:
   RELEASE_TAG: ${{ github.event.inputs.tag }}
   ASSET_REVISION: ${{ github.event.inputs.asset_revision || '' }}
   MCPP_SOURCE_REF: ${{ github.event.inputs.mcpp_ref || vars.MCPP_SOURCE_REF || '' }}
-  # 2026.11.9.1: openkal-run states its implementation as a capability with defaults.
+  # 2026.11.10.1: openkal-run binds the interfaces its implementation provides.
   # mcpp_ref supplies the candidate until this release is installable.
-  MCPP_VERSION: 2026.11.9.1
+  MCPP_VERSION: 2026.11.10.1
   # The platform whose hosted arrangement the programs are built over, named by
   # the dispatch beside the tag: a tag's tools pin exact implementations, and the
   # platform is the one whose version group holds them (0.1.4: 0.18.0; 0.1.5:

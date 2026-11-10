@@ -128,43 +128,46 @@ OKRUN_IMAGE_ABI void own_kal_prof_mark(const char* name, kal_uintptr len, int be
 OKRUN_IMAGE_ABI kal_intptr own_kal_debug_symbolize(kal_uintptr address, char* out, kal_uintptr cap,
                                                    kal_uintptr* start) {
     const kal_intptr n = symbolize(address, out, cap, start);
-    return n >= 0 ? n : kal_debug_symbolize(address, out, cap, start);
+    return n >= 0 ? n : impl_debug_symbolize(address, out, cap, start);
 }
 // WHAT ENDS THE PROGRAM FOR A FAULT, AND WHAT SAMPLES AND TOUCHES, IS THE
 // IMPLEMENTATION'S (openkal 0.23, SPEC 12.3): a fault, a timer and a page's
 // first execution are the environment's to see, and this runner forwards. A
 // measurement of this runner's own that samples or records touches holds them,
 // and the program asking is told kal_err_again.
-OKRUN_IMAGE_ABI kal_uintptr own_kal_debug_props(void) { return kal_debug_props(); }
-OKRUN_IMAGE_ABI kal_uintptr own_kal_prof_props(void) { return kal_prof_props(); }
+OKRUN_IMAGE_ABI kal_uintptr own_kal_debug_props(void) { return impl_debug_props(); }
+OKRUN_IMAGE_ABI kal_uintptr own_kal_prof_props(void) { return impl_prof_props(); }
 OKRUN_IMAGE_ABI int own_kal_prof_sample_begin(kal_u32 per_second) {
     if (profile_samples()) return kal_err_again;
-    return kal_prof_sample_begin(per_second);
+    return impl_prof_sample_begin(per_second);
 }
 OKRUN_IMAGE_ABI kal_intptr own_kal_prof_sample_take(kal_prof_sample* out, kal_uintptr count) {
     if (profile_samples()) return 0;
-    return kal_prof_sample_take(out, count);
+    return impl_prof_sample_take(out, count);
 }
 OKRUN_IMAGE_ABI int own_kal_prof_sample_end(void) {
     if (profile_samples()) return kal_err_invalid;
-    return kal_prof_sample_end();
+    return impl_prof_sample_end();
 }
 OKRUN_IMAGE_ABI int own_kal_prof_touch_begin(const void* at, kal_uintptr size) {
     if (profile_touches()) return kal_err_again;
-    return kal_prof_touch_begin(at, size);
+    return impl_prof_touch_begin(at, size);
 }
 OKRUN_IMAGE_ABI kal_intptr own_kal_prof_touch_take(kal_uintptr* out, kal_uintptr count) {
     if (profile_touches()) return 0;
-    return kal_prof_touch_take(out, count);
+    return impl_prof_touch_take(out, count);
 }
 OKRUN_IMAGE_ABI int own_kal_prof_touch_end(void) {
     if (profile_touches()) return kal_err_invalid;
-    return kal_prof_touch_end();
+    return impl_prof_touch_end();
 }
 
 #define OKRUN_BIND(n, i)     { #n, reinterpret_cast<void*>(&present<&::n>::call) },
 #define OKRUN_OWN(n, i)      { #n, reinterpret_cast<void*>(&own_##n) },
 #define OKRUN_CALLBACK(n, i) { #n, reinterpret_cast<void*>(&callback_##n) },
+// A name of an interface the implementation does not provide: listed, so that
+// every name keeps its position, and bound to nothing.
+#define OKRUN_ABSENT(n, i)   { #n, nullptr },
 
 // At namespace scope, so that it is made once at start and no guard is asked
 // of a C++ run-time this library may be linked without.
@@ -179,13 +182,45 @@ const binding g_counted[] = {
 };
 static_assert(sizeof g_table / sizeof g_table[0] <= kProfiledNames, "the call counts hold every name");
 
+// openkal.space. A started context begins at an address in a copy of the
+// space, not by a call, so the entry is passed as it is: the systems that
+// provide the interface share the image's convention.
+#undef OKRUN_BIND
+#undef OKRUN_OWN
+#undef OKRUN_CALLBACK
+#define OKRUN_BIND(n, i)     { #n, reinterpret_cast<void*>(&present<&::n>::call) },
+#define OKRUN_OWN(n, i)      OKRUN_BIND(n, i)
+#define OKRUN_CALLBACK(n, i) OKRUN_BIND(n, i)
+const binding g_space[] = {
+#include "surface_space.inc"
+};
+
 }  // namespace
 
-kal_u64 own_interfaces() { return kal_interfaces() | KAL_IFACE_PROF | KAL_IFACE_DEBUG; }
+// WHAT THIS RUNNER PROVIDES (SPEC 12.3): the implementation's answer where this
+// runner binds the interface, and the loader's own interfaces. An
+// implementation that answers more than its manifest states is not trusted
+// with a name the runner never bound.
+kal_u64 own_interfaces() {
+    return (kal_interfaces() & OKRUN_COMPILED_INTERFACES) | KAL_IFACE_PROF | KAL_IFACE_DEBUG;
+}
 
 const binding* bindings(unsigned long& count) {
     count = sizeof g_table / sizeof g_table[0];
     return profile_calls() ? g_counted : g_table;
 }
+
+const binding* space_bindings(unsigned long& count) {
+    count = sizeof g_space / sizeof g_space[0];
+    return g_space;
+}
+
+#if OKRUN_HAS_SPACE
+kal_uintptr space_props() { return kal_space_props(); }
+void* space_props_binding() { return reinterpret_cast<void*>(&present<&::kal_space_props>::call); }
+#else
+kal_uintptr space_props() { return 0; }
+void* space_props_binding() { return nullptr; }
+#endif
 
 }  // namespace okrun
