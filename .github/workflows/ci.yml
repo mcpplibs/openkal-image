@@ -69,7 +69,7 @@ jobs:
             mkdir -p "out/$arch"
             bash examples/build-image.sh "$arch" "out/$arch/hello.oke" examples/hello/app.c
             # The declarations are compiled from the public pinned specification.
-            spec=$(find "$HOME/.mcpp" -path '*openkal*0.24.0*/include/openkal/process.h' -type f | head -1)
+            spec=$(find "$HOME/.mcpp" -path '*openkal*0.25.0*/include/openkal/process.h' -type f | head -1)
             test -n "$spec"
             CPATH="${spec%/openkal/process.h}" bash examples/build-image.sh "$arch" "out/$arch/process-unit.oke" examples/process-unit/app.c
             bash examples/build-image.sh "$arch" "out/$arch/liboktwice.okso" examples/needed/lib.c
