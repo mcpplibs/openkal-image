@@ -29,7 +29,9 @@ on:
 env:
   XLINGS_VERSION: v2026.10.26.1
   XLINGS_NON_INTERACTIVE: '1'
-  MCPP_VERSION: 2026.11.9.1
+  # 2026.11.10.1: openkal-run binds the interfaces its implementation provides
+  # (MCPP_KERNEL_ABI_INTERFACES).
+  MCPP_VERSION: 2026.11.10.1
   LLVM: llvm@23.1.3
 
 jobs:
@@ -54,6 +56,12 @@ jobs:
           mcpp toolchain default "$LLVM"
       - name: libokld against the published vectors
         run: (cd ld && mcpp test)
+      # The run `mcpp test` kept (ld/target/mtest): this job's report in its
+      # summary, and the store for the workflow run's report (`report`).
+      - uses: ./.github/actions/test-report
+        if: always()
+        with:
+          name: mtest-images
       - name: Debugger object bounds and failed-admission ownership
         run: python3 .github/scripts/check-debugger-contract.py --cxx "$HOME/.mcpp/registry/data/xpkgs/xim-x-llvm/23.1.3/bin/clang++"
       - name: okld
@@ -260,6 +268,10 @@ jobs:
           okprof=$(find "$PWD/target" -path '*bin*' \( -name okprof -o -name okprof.exe \) -type f | head -1)
           [ -n "$okprof" ] || { echo "::error::okprof did not build"; exit 1; }
           echo "OKPROF=$okprof" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/test-report
+        if: always()
+        with:
+          name: mtest-run-${{ matrix.host }}
       - name: okprof forwards environment values and the child's status
         run: |
           python=python3; [ "$RUNNER_OS" = Windows ] && python=python
@@ -486,3 +498,35 @@ jobs:
             grep -q "$want" bind.txt || { echo "::error::the binding: $want"; exit 1; }
           done
           bash examples/bind/check-refusals.sh
+
+  # EVERY JOB'S TEST RUNS AS ONE REPORT (`mtest ci report`, the workflow run's
+  # group): libokld's vectors on the image machine and on each system.
+  report:
+    name: tests (report)
+    needs: [images, run]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xlings
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/openxlings/xlings/main/tools/other/quick_install.sh | bash -s "$XLINGS_VERSION"
+          echo "$HOME/.xlings/subos/current/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/mtest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mtest-*
+          path: stores
+      - name: Every job's runs, reported together
+        run: |
+          set -euo pipefail
+          found=0
+          for store in stores/*/; do
+            [ -f "$store/index.ndjson" ] || continue
+            "$MTEST" store import --from "$store"
+            found=1
+          done
+          [ "$found" = 1 ] || { echo "no job kept a run" >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          "$MTEST" ci report --group "$GITHUB_RUN_ID" --out tests.md
+          cat tests.md >> "$GITHUB_STEP_SUMMARY"

@@ -222,10 +222,9 @@ bool admit(const void* bytes, unsigned long long size, const char* name, const o
     // WHAT THE IMAGE REQUIRES, AGAINST WHAT THIS IMPLEMENTATION PROVIDES: the
     // loader reports at load what a linker reports at link (SPEC 12.4).
     // The loader's own interfaces are provided whatever the implementation
-    // provides (SPEC 12.3, 0.2).
-    unsigned long long provided = kal_interfaces() | KAL_IFACE_PROF | KAL_IFACE_DEBUG;
-    unsigned long n = 0;
-    if (!space_bindings(n) || n == 0) provided &= ~(1ull << 13);
+    // provides (SPEC 12.3, 0.2); the implementation's are those it answers and
+    // this runner binds (0.6).
+    const unsigned long long provided = own_interfaces();
     if (const unsigned long long missing = info.interfaces & ~provided) {
         text t(why, cap);
         t << name << " requires";

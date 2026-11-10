@@ -12,9 +12,12 @@
 #include <vector>
 #include <okld.h>
 
+import mcpplibs.mtest;
+
+using namespace mcpplibs::mtest;
+
 namespace {
-int failures = 0;
-void check(bool held, const char* what) { std::printf("  %s  %s\n", held ? "held" : "FAIL", what); if (!held) ++failures; }
+void check(bool held, const char* what) { expect(held) << what; }
 std::string hex(const unsigned char* p, int n) {
     std::string s; char b[3];
     for (int i = 0; i < n; ++i) { std::snprintf(b, sizeof b, "%02x", p[i]); s += b; }
@@ -30,7 +33,7 @@ std::vector<unsigned char> write(const std::vector<okld_zip_input>& in) {
 }
 }  // namespace
 
-int main() {
+UTest okb_test{"okb", [] {
     unsigned char d[32];
     okld_sha256("abc", 3, d);
     check(hex(d, 32) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "SHA-256 of \"abc\" (FIPS 180-4)");
@@ -305,5 +308,4 @@ int main() {
         check(admit(pack(without, big), without, nullptr, &why) == 0, "without chunks, the whole digest is verified");
         check(admit(pack(without, changed), without, nullptr, &why) < 0, "and refuses a changed byte");
     }
-    return failures;
-}
+}};
