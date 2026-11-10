@@ -69,6 +69,13 @@ generated from the specification's SURFACE.txt, so the names 0.25 adds
 sources. The package follows openkal 0.25 (openkal-linux 0.26, openkal-macos
 0.23, openkal-windows 0.21).
 
+Version 0.6.1 names openkal-freebsd as the default on FreeBSD
+(`cfg(os = "freebsd")`), so the runner is built for both of that system's
+identities: over FreeBSD's own C library (`<arch>-freebsd`, a platform that
+states the system's base), where openkal-freebsd is hosted, and over
+openkal-musl (`<arch>-freebsd-musl`), whose graph already holds openkal-freebsd
+standalone. No other change.
+
 ## An image
 
 ```sh
