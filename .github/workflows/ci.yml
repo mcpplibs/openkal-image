@@ -288,6 +288,15 @@ jobs:
           grep -q "argc as kal_env_arg_count = 3" <<<"$out" || { echo "::error::the image's arguments"; exit 1; }
           grep -q "mix = 204" <<<"$out" || { echo "::error::the calling convention"; exit 1; }
           grep -q "tls main=1 ctx1=10 ctx2=20" <<<"$out" || { echo "::error::thread-local storage or the callback"; exit 1; }
+          # A RELATIVE NAME THAT CLIMBS (0.6.2): `..' above the working
+          # directory folds against its name and opens through the supplied
+          # directory that then holds it; `./' beside it and an absolute name
+          # already ran.
+          mkdir -p rel/below
+          (cd rel/below && "$OKRUN" ../../"out/$a/hello.oke" one | tr -d '\r' \
+            | grep -q "argc as kal_env_arg_count = 2") \
+            || { echo "::error::a relative image name with .. was not opened"; exit 1; }
+          echo "  ok  a relative name that climbs opens the image"
           n=$("$OKRUN" "out/$a/needed.oke" | tr -d '\r')
           echo "$n"
           grep -q "twice(21) = 42, next_value() = 41" <<<"$n" || { echo "::error::an image another needs"; exit 1; }

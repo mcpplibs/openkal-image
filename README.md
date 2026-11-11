@@ -76,6 +76,14 @@ states the system's base), where openkal-freebsd is hosted, and over
 openkal-musl (`<arch>-freebsd-musl`), whose graph already holds openkal-freebsd
 standalone. No other change.
 
+Version 0.6.2 opens an image whose relative name climbs above the working
+directory (`../image.oke`). Such a name was passed to the file system as it
+stood, and an openkal name admits no `..` component, so the image was refused.
+The runner now folds a relative name against the first directory's name ---
+`..' and `.' lexically, a symlink left to the file system --- into the absolute
+name beneath it, which is matched against the supplied directories as an
+absolute one is. No other change.
+
 ## An image
 
 ```sh
