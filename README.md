@@ -84,6 +84,23 @@ The runner now folds a relative name against the first directory's name ---
 name beneath it, which is matched against the supplied directories as an
 absolute one is. No other change.
 
+Version 0.6.3 builds a core runner where the implementation beneath it has no
+files, processes or threads --- a firmware's, such as openkal-uefi. One interface
+(`include/okrun.h`, `run/src/runner.h`, the bindings) has two runners, and
+`run/mcpp.toml` selects one by the interfaces the implementation provides
+(`cfg(interface = "openkal.fs")`, mcpp 2026.11.13.1): with `openkal.fs`,
+`openkal.process`, `openkal.task`, `openkal.random` and `openkal.map` the full
+runner (`run/src/full`), unchanged; without any of them the core runner
+(`run/src/core`). The core runner runs what the program carries, from memory:
+an image, a group of images, or an archive of them (`okrun_run_bytes`,
+`okrun_run_images`, `okrun_run_okb_bytes`), with the same admission --- the
+requirements note, the architecture, the signature --- and the same loader. It
+has no cache, no snapshot and no profiler, and `okrun_run_file` refuses with the
+reason. A name of an interface the implementation does not provide is absent to
+the image, so an image that imports it weakly runs (SPEC 12.4). openkal-run
+itself requires only `openkal.abort`, `openkal.env`, `openkal.exec`,
+`openkal.memory`, `openkal.stream` and `openkal.time`, and mcpp 2026.11.13.1.
+
 ## An image
 
 ```sh

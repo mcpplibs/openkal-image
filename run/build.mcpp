@@ -82,8 +82,11 @@ int main() {
         // of the calls an image makes (okprof, 0.2) keeps its counts.
         for (std::size_t i = 0; i < names.size(); ++i) {
             const auto& n = names[i];
-            o << (own.contains(n) ? "OKRUN_OWN(" : callbacks.contains(n) ? "OKRUN_CALLBACK(" :
-                  provided.contains(group_of[n]) ? "OKRUN_BIND(" : "OKRUN_ABSENT(")
+            // A callback of an interface the implementation does not provide is absent, as
+            // its other names are (0.6.3: a context cannot be started where there are none).
+            o << (own.contains(n) ? "OKRUN_OWN(" :
+                  !provided.contains(group_of[n]) ? "OKRUN_ABSENT(" :
+                  callbacks.contains(n) ? "OKRUN_CALLBACK(" : "OKRUN_BIND(")
               << n << ", " << i << ")\n";
         }
     };

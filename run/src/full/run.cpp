@@ -18,8 +18,9 @@
 #include <openkal.h>
 #include <okld.h>
 #include <okrun.h>
-#include "image_abi.h"
-#include "runner.h"
+#include "../image_abi.h"
+#include "../runner.h"
+
 
 namespace okrun {
 
@@ -1756,37 +1757,6 @@ bool locate_path(const char* path, kal_dir& dir, const char*& rest) { return loc
 
 using namespace okrun;
 
-extern "C" const char* const* okrun_names(unsigned long* count) {
-    static const char* names[256];
-    static unsigned long n = 0;
-    if (n == 0) {
-        unsigned long k = 0;
-        const binding* t = bindings(k);
-        for (unsigned long i = 0; i < k && n < 256; ++i) names[n++] = t[i].name;
-        t = space_bindings(k);
-        for (unsigned long i = 0; t && i < k && n < 256; ++i) names[n++] = t[i].name;
-    }
-    if (count) *count = n;
-    return names;
-}
-
-// A NAME'S SLOT, from a hash under which no two of the surface's names share
-// one (build.mcpp, 0.4): one name compared, where every name was.
-#include "surface_hash.inc"
-
-extern "C" void* okrun_resolve(const char* name) {
-    if (!name) return nullptr;
-    unsigned h = 2166136261u ^ kResolveSeed;
-    for (const char* c = name; *c; ++c) { h ^= static_cast<unsigned char>(*c); h *= 16777619u; }
-    const unsigned short slot = kResolveSlot[h % kResolveSlots];
-    if (slot == 0) return nullptr;
-    unsigned long n = 0;
-    const unsigned long i = slot - 1u;
-    const binding* t = i < kResolveMain ? bindings(n) : space_bindings(n);
-    const unsigned long k = i < kResolveMain ? i : i - kResolveMain;
-    if (!t || k >= n || !same(t[k].name, name)) return nullptr;
-    return t[k].address;
-}
 
 extern "C" int okrun_run_bytes(const void* bytes, unsigned long long size, const char* name,
                                int argc, const char* const* argv, const okrun_options* options,
@@ -1973,8 +1943,6 @@ bool has_separator(const char* s) { for (; *s; ++s) if (separator(*s)) return tr
 
 }  // namespace
 
-extern "C" unsigned long long okrun_call_enter(void) { return okrun_fp_enter(); }
-extern "C" void okrun_call_leave(unsigned long long state) { okrun_fp_leave(state); }
 
 extern "C" okrun_library* okrun_open_library(const char* path, const okrun_options* options,
                                              char* why, unsigned long long cap) {
@@ -2024,3 +1992,4 @@ extern "C" void okrun_close(okrun_library* lib) {
     }
     free_library(lib);
 }
+
