@@ -36,8 +36,9 @@ inline void okrun_fp_leave(unsigned long long state) {
 #elif defined(__i386__)
 // THE SYSTEM V i386 CONVENTION (SPEC 12.2, clause 5.5): arguments on the stack,
 // the stack aligned to sixteen bytes at a call, the result in eax. The x87
-// control word 0x037F, and MXCSR 0x1F80 where the processor has SSE --- a
-// Pentium, which DOS's emulators model, has none (CPUID leaf 1, EDX bit 25).
+// control word 0x037F, and MXCSR 0x1F80 where the processor has SSE --- the
+// 486 and the Pentium that DOS's emulators model have none (CPUID leaf 1, EDX
+// bit 25).
 #define OKRUN_IMAGE_ABI __attribute__((cdecl))
 inline constexpr char okrun_arch[] = "i686";
 inline bool okrun_detect_sse() {

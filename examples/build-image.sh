@@ -18,9 +18,10 @@ done
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 extra=()
 [ "$arch" = aarch64 ] && extra=(-ffixed-x18 -mno-outline-atomics)
-# i386 (0.6.3): the Pentium's instructions, and the stack aligned to sixteen bytes
-# at a call (SPEC 12.2), which a triple with no system leaves at four.
-[ "$arch" = i686 ] && extra=(-march=i586 -mstack-alignment=16)
+# i386 (0.6.3): the 486's instructions (an image runs where DOSBox does, which
+# executes no CMPXCHG8B), and the stack aligned to sixteen bytes at a call
+# (SPEC 12.2), which a triple with no system leaves at four.
+[ "$arch" = i686 ] && extra=(-march=i486 -mstack-alignment=16)
 "$OKLD" note-source > "$work/note.S"
 objs=()
 for src in "${sources[@]}" "$work/note.S"; do
