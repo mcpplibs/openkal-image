@@ -380,7 +380,7 @@ extern "C" int okld_okb_admit_layout(okld_u64 archive_size, const okld_zip_membe
 }
 
 extern "C" const char* okld_okb_arch_of(okld_u32 machine) {
-    return machine == 62 ? "x86_64" : machine == 183 ? "aarch64" : nullptr;
+    return machine == 62 ? "x86_64" : machine == 183 ? "aarch64" : machine == 3 ? "i686" : nullptr;
 }
 
 extern "C" int okld_okb_chunks(const void* json, okld_size n, const char* member, okld_u64* chunk_size,

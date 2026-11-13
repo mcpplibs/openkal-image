@@ -820,7 +820,8 @@ int main(int argc, char** argv) {
         okld_info info{};
         okld_why why{};
         if (okld_read(image->data(), image->size(), &info, &why) != 0) { std::println(std::cerr, "okld: {}", why.text); return 1; }
-        std::println("architecture  {}", info.machine == 62 ? "x86_64" : info.machine == 183 ? "aarch64" : "other");
+        const char* arch = okld_okb_arch_of(info.machine);
+        std::println("architecture  {}", arch ? arch : "other");
         std::println("format        {}", info.has_requirements ? std::format("{}.{}", info.format_major, info.format_minor) : std::string("no requirements note"));
         std::println("requires      {}", interfaces(info.interfaces));
         unsigned char key[32];
