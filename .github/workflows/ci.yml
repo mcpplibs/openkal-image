@@ -128,6 +128,16 @@ jobs:
             if "$OKLD" check changed.oke 2> changed-placement.txt; then echo "::error::a changed stored segment passed okld check"; exit 1; fi
             grep -q "SPEC 12.4" changed-placement.txt
           done
+          # i386 (0.6.3): read, placed and checked here; a runner of i386 runs
+          # them where it is built (openkal-platform's row i686-openkal).
+          mkdir -p out/i686
+          bash examples/build-image.sh i686 out/i686/hello.oke examples/hello/app.c
+          bash examples/build-image.sh i686 out/i686/liboktwice.okso examples/needed/lib.c
+          bash examples/build-image.sh i686 out/i686/needed.oke examples/needed/app.c -- out/i686/liboktwice.okso
+          "$OKLD" inspect out/i686/hello.oke | grep -q '^architecture *i686$' \
+            || { echo "::error::an i386 image is not named i686"; exit 1; }
+          "$OKLD" bundle i386.okb --version 0.1.0 out/x86_64/hello.oke out/i686/hello.oke
+          "$OKLD" bundle check i386.okb | grep -q 'i686 (1 image(s))'
           "$OKLD" keygen "$RUNNER_TEMP/seed" > out/key.hex
           for arch in x86_64 aarch64; do
             "$OKLD" sign "out/$arch/signed.oke" "$RUNNER_TEMP/seed"

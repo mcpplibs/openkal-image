@@ -4,9 +4,9 @@
 # with the compiler and linker any LLVM carries (SPEC 12.2): no operating
 # system in the triple, position-independent, emulated thread-local storage,
 # x18 left alone on AArch64, segments aligned to 64 KiB, relative relocations
-# packed, the notes linked in, the requirements written by `okld note', and the
-# image placed at its base by `okld place' (openkal 0.23; PLACE=0 leaves the
-# placement note empty).
+# packed, the addends stated (RELA; i386's default is REL), the notes linked in,
+# the requirements written by `okld note', and the image placed at its base by
+# `okld place' (openkal 0.23; PLACE=0 leaves the placement note empty).
 set -euo pipefail
 arch="$1"; out="$2"; shift 2
 sources=(); link=()
@@ -18,6 +18,9 @@ done
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 extra=()
 [ "$arch" = aarch64 ] && extra=(-ffixed-x18 -mno-outline-atomics)
+# i386 (0.6.3): the Pentium's instructions, and the stack aligned to sixteen bytes
+# at a call (SPEC 12.2), which a triple with no system leaves at four.
+[ "$arch" = i686 ] && extra=(-march=i586 -mstack-alignment=16)
 "$OKLD" note-source > "$work/note.S"
 objs=()
 for src in "${sources[@]}" "$work/note.S"; do
@@ -29,7 +32,7 @@ for src in "${sources[@]}" "$work/note.S"; do
 done
 entry=(-e ok_main)
 case "$out" in *.okso) entry=(-soname "$(basename "$out")") ;; esac
-"$LLD" -shared -z max-page-size=65536 -z now -z noexecstack -z pack-relative-relocs --hash-style=both "${entry[@]}" \
+"$LLD" -shared -z max-page-size=65536 -z now -z noexecstack -z pack-relative-relocs -z rela --hash-style=both "${entry[@]}" \
   -o "$out" "${objs[@]}" "${link[@]}"
 "$OKLD" note "$out"
 [ "${PLACE:-1}" = 0 ] || "$OKLD" place "$out"
