@@ -77,8 +77,10 @@ jobs:
           for arch in x86_64 aarch64; do
             mkdir -p "out/$arch"
             bash examples/build-image.sh "$arch" "out/$arch/hello.oke" examples/hello/app.c
-            # The declarations are compiled from the public pinned specification.
-            spec=$(find "$HOME/.mcpp" -path '*openkal*0.25.0*/include/openkal/process.h' -type f | head -1)
+            # The declarations are compiled from the public specification the
+            # tools resolved: any patch of its minor version (openkal clause 8),
+            # which is 0.25.1 since that patch was published.
+            spec=$(find "$HOME/.mcpp" -path '*openkal*0.25.*/include/openkal/process.h' -type f | sort -V | tail -1)
             test -n "$spec"
             CPATH="${spec%/openkal/process.h}" bash examples/build-image.sh "$arch" "out/$arch/process-unit.oke" examples/process-unit/app.c
             bash examples/build-image.sh "$arch" "out/$arch/liboktwice.okso" examples/needed/lib.c
