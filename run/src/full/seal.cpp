@@ -12,8 +12,9 @@
 // making it (`seal_refused', src/run.cpp), and the program itself, which runs
 // beside, never meets it.
 #include <openkal.h>
-#include "image_abi.h"
-#include "runner.h"
+#include "../image_abi.h"
+#include "../runner.h"
+
 
 namespace okrun {
 
@@ -380,3 +381,4 @@ kal_u32 environment_facts(kal_u64 asked) {
 }
 
 }  // namespace okrun
+

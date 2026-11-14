@@ -5,6 +5,14 @@
 // OKRUN_HAS_<INTERFACE> and OKRUN_COMPILED_INTERFACES (build.mcpp, 0.6).
 #include "provided.inc"
 
+// ONE INTERFACE, TWO RUNNERS (0.6.3). This header, bindings.cpp and adapters.cpp are both
+// runners'. The full runner (full/) reads images from files, keeps a cache of their placements and
+// snapshots for this machine, starts itself again, and digests in parallel: it needs a file system,
+// processes, contexts, random bytes and file mapping. An implementation without them --- firmware,
+// a single-task system --- has the core runner (core/): an image, or an archive of images, that the
+// program carries runs from memory, its code placed through openkal.exec. The C interface is the
+// same; mcpp.toml selects the directory by the interfaces the implementation provides.
+
 namespace okrun {
 
 struct binding { const char* name; void* address; };

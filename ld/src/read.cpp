@@ -15,7 +15,7 @@ size view::symbol_count() const {
     const auto* head = at<elf::u32>(g, 4);
     if (!head) return 0;
     const elf::u32 nbuckets = head[0], symoffset = head[1], bloom = head[2];
-    const auto buckets_at = g + 16 + static_cast<elf::u64>(bloom) * 8;
+    const auto buckets_at = g + 16 + static_cast<elf::u64>(bloom) * word();
     const auto* buckets = at<elf::u32>(buckets_at, nbuckets);
     if (!buckets) return 0;
     elf::u32 last = 0;
@@ -29,6 +29,51 @@ size view::symbol_count() const {
     }
 }
 
+namespace {
+// An i386 image (ELFCLASS32, EM_386): its header, program headers and dynamic
+// table widened into the view's own storage.
+bool open32(view& v, sentence& s) {
+    const auto* e = v.at<elf::ehdr32>(0);
+    if (!e) { s << "shorter than an ELF header"; return false; }
+    if (e->type != elf::et_dyn) { s << "not position-independent (ET_DYN; SPEC 12.2)"; return false; }
+    if (e->machine != elf::em_386) {
+        s << "the architecture "; s.num(e->machine); s << " has no fixed convention in the 32-bit class (SPEC 12.2)";
+        return false;
+    }
+    if (e->phentsize != sizeof(elf::phdr32)) { s << "program headers of an unexpected size"; return false; }
+    if (e->phnum > view::max_ph32) { s << "more program headers than a 32-bit image is read with"; return false; }
+    const auto* ph = v.at<elf::phdr32>(e->phoff, e->phnum);
+    if (!ph) { s << "program headers beyond the file"; return false; }
+    v.wide = false;
+    auto& w = v.eh_wide;
+    copy(w.ident, e->ident, sizeof w.ident);
+    w.type = e->type; w.machine = e->machine; w.version = e->version;
+    w.entry = e->entry; w.phoff = e->phoff; w.shoff = e->shoff;
+    w.flags = e->flags; w.ehsize = e->ehsize; w.phentsize = e->phentsize; w.phnum = e->phnum;
+    w.shentsize = e->shentsize; w.shnum = e->shnum; w.shstrndx = e->shstrndx;
+    v.eh = &v.eh_wide;
+    for (unsigned i = 0; i < e->phnum; ++i)
+        v.ph_wide[i] = elf::phdr{ ph[i].type, ph[i].flags, ph[i].offset, ph[i].vaddr, ph[i].paddr,
+                                  ph[i].filesz, ph[i].memsz, ph[i].align };
+    v.ph = v.ph_wide;
+    for (unsigned i = 0; i < e->phnum; ++i)
+        if (v.ph[i].type == elf::pt_dynamic) v.dynamic_ph = &v.ph[i];
+    if (v.dynamic_ph) {
+        const auto n = v.dynamic_ph->filesz / sizeof(elf::dyn32);
+        const auto* d = v.at<elf::dyn32>(v.dynamic_ph->offset, n);
+        if (!d) { s << "a dynamic table beyond the file"; return false; }
+        size k = 0;
+        for (; k < n && d[k].tag != elf::dt_null; ++k) {
+            if (k + 1 >= view::max_dyn32) { s << "a dynamic table longer than a 32-bit image is read with"; return false; }
+            v.dyn_wide[k] = elf::dyn{ d[k].tag, d[k].val };
+        }
+        v.dyn_wide[k] = elf::dyn{ elf::dt_null, 0 };
+        v.ndyn_wide = k + 1;
+    }
+    return true;
+}
+}  // namespace
+
 bool open(const void* bytes, size n, view& v, char* why, size cap) {
     sentence s(why, cap);
     v.data = static_cast<const unsigned char*>(bytes);
@@ -39,10 +84,16 @@ bool open(const void* bytes, size n, view& v, char* why, size cap) {
     if (!(e.ident[0] == 0x7f && e.ident[1] == 'E' && e.ident[2] == 'L' && e.ident[3] == 'F')) {
         s << "not ELF: an image is ELF (SPEC 12.2)"; return false;
     }
-    if (e.ident[4] != 2 || e.ident[5] != 1) { s << "not 64-bit little-endian ELF (SPEC 12.2)"; return false; }
+    if (e.ident[5] != 1) { s << "not little-endian ELF (SPEC 12.2)"; return false; }
+    // The class is the architecture's (SPEC 12.2): sixty-four bits for x86-64 and
+    // AArch64, thirty-two for i386 (clause 5.5).
+    if (e.ident[4] == 1) return open32(v, s);
+    if (e.ident[4] != 2) { s << "neither 32-bit nor 64-bit ELF (SPEC 12.2)"; return false; }
     if (e.type != elf::et_dyn) { s << "not position-independent (ET_DYN; SPEC 12.2)"; return false; }
     if (e.machine != elf::em_x86_64 && e.machine != elf::em_aarch64) {
-        s << "the architecture "; s.num(e.machine); s << " has no fixed convention (SPEC 12.2)"; return false;
+        s << "the architecture "; s.num(e.machine);
+        s << (e.machine == elf::em_386 ? " is of the 32-bit class (SPEC 12.2)" : " has no fixed convention (SPEC 12.2)");
+        return false;
     }
     if (e.phentsize != sizeof(elf::phdr)) { s << "program headers of an unexpected size"; return false; }
     v.ph = v.at<elf::phdr>(e.phoff, e.phnum);
@@ -126,13 +177,11 @@ void each_import(const void* bytes, okld_size n, bool weak_too, void (*each)(con
     view v;
     char why[8];
     if (!open(bytes, n, v, why, sizeof why)) return;
-    const auto* syms = v.symbols();
     const auto count = v.symbol_count();
-    if (!syms) return;
-    for (size k = 1; k < count; ++k)
-        if (syms[k].shndx == elf::shn_undef && syms[k].name
-            && (weak_too || elf::st_bind(syms[k].info) != elf::stb_weak))
-            if (const char* name = v.string(syms[k].name); name && *name) each(name, ctx);
+    elf::sym s{};
+    for (size k = 1; k < count && v.symbol(k, s); ++k)
+        if (s.shndx == elf::shn_undef && s.name && (weak_too || elf::st_bind(s.info) != elf::stb_weak))
+            if (const char* name = v.string(s.name); name && *name) each(name, ctx);
 }
 }  // namespace
 
@@ -148,12 +197,11 @@ extern "C" void okld_exports(const void* bytes, okld_size n, void (*each)(const 
     view v;
     char why[8];
     if (!open(bytes, n, v, why, sizeof why)) return;
-    const auto* syms = v.symbols();
     const auto count = v.symbol_count();
-    if (!syms) return;
-    for (size k = 1; k < count; ++k)
-        if (syms[k].shndx != elf::shn_undef && elf::st_bind(syms[k].info) != elf::stb_local && syms[k].name)
-            if (const char* name = v.string(syms[k].name); name && *name) each(name, ctx);
+    elf::sym s{};
+    for (size k = 1; k < count && v.symbol(k, s); ++k)
+        if (s.shndx != elf::shn_undef && elf::st_bind(s.info) != elf::stb_local && s.name)
+            if (const char* name = v.string(s.name); name && *name) each(name, ctx);
 }
 
 namespace {
@@ -166,49 +214,51 @@ struct checker {
 // writes hold what it computes for the base, and every other word is the
 // file's. Counted rather than copied, since nothing here allocates.
 void verify_placement(const view& v, const placement& p, checker& c) {
-    const bool x86 = v.eh->machine == elf::em_x86_64;
-    const elf::u32 relative = x86 ? elf::r_x86_64_relative : elf::r_aarch64_relative;
+    const elf::u32 relative = relative_type(v);
+    const elf::u64 w = v.word();
     for (elf::u32 i = 0; i < p.count; ++i) {
         const auto& e = p.e[i];
         const elf::u64 file = v.offset_of(e.vaddr);
         if (file == ~0ull) { c.fail("a placed segment has no bytes in the file"); return; }
         const unsigned char* was = v.data + file;
         const unsigned char* now = v.data + e.offset;
-        auto word = [](const unsigned char* b, elf::u64 at) { elf::u64 w = 0; copy(&w, b + at, 8); return w; };
-        auto inside = [&](elf::u64 at) { return at >= e.vaddr && at <= e.vaddr + e.size && e.size - (at - e.vaddr) >= 8; };
+        auto word = [&](const unsigned char* b, elf::u64 at) { return v.word_of(b + at); };
+        auto inside = [&](elf::u64 at) { return at >= e.vaddr && at <= e.vaddr + e.size && e.size - (at - e.vaddr) >= w; };
+        const elf::u64 mask = w == 8 ? ~0ull : 0xffffffffull;
         elf::u64 written = 0, wrong = 0;
         auto expect = [&](elf::u64 at, elf::u64 value) {
             if (!inside(at)) return;
-            if (word(was, at - e.vaddr) != value) ++written;
-            if (word(now, at - e.vaddr) != value) ++wrong;
+            if (word(was, at - e.vaddr) != (value & mask)) ++written;
+            if (word(now, at - e.vaddr) != (value & mask)) ++wrong;
         };
         auto table = [&](elf::i64 tag, elf::i64 size_tag) {
-            const auto at = v.offset_of(v.dynamic(tag, ~0ull));
-            const auto n = v.dynamic(size_tag);
-            const auto* r = at == ~0ull ? nullptr : v.at<elf::rela>(at, n / sizeof(elf::rela));
-            for (size k = 0; r && k < n / sizeof(elf::rela); ++k)
-                if (elf::r_type(r[k].info) == relative) expect(r[k].offset, p.base + static_cast<elf::u64>(r[k].addend));
+            const auto n = v.relocation_count(tag, size_tag);
+            for (size k = 0; k < n; ++k) {
+                const auto r = v.relocation(tag, k);
+                if (elf::r_type(r.info) == relative) expect(r.offset, p.base + static_cast<elf::u64>(r.addend));
+            }
         };
         table(elf::dt_rela, elf::dt_relasz);
         table(elf::dt_jmprel, elf::dt_pltrelsz);
         const auto relr = v.offset_of(v.dynamic(elf::dt_relr, ~0ull));
-        const auto relr_n = v.dynamic(elf::dt_relrsz) / 8;
-        const auto* rr = relr == ~0ull ? nullptr : v.at<elf::u64>(relr, relr_n);
+        const auto relr_n = v.dynamic(elf::dt_relrsz) / w;
+        const auto* rr = relr == ~0ull ? nullptr : v.at<unsigned char>(relr, relr_n * w);
         elf::u64 next = 0;
         for (size k = 0; rr && k < relr_n; ++k) {
-            if ((rr[k] & 1) == 0) {
-                if (inside(rr[k])) expect(rr[k], word(was, rr[k] - e.vaddr) + p.base);
-                next = rr[k] + 8;
+            const elf::u64 entry = v.word_of(rr + k * w);
+            if ((entry & 1) == 0) {
+                if (inside(entry)) expect(entry, word(was, entry - e.vaddr) + p.base);
+                next = entry + w;
             } else {
-                elf::u64 bits = rr[k] >> 1;
+                elf::u64 bits = entry >> 1;
                 for (elf::u64 j = 0; bits; ++j, bits >>= 1)
-                    if ((bits & 1) && inside(next + 8 * j)) expect(next + 8 * j, word(was, next + 8 * j - e.vaddr) + p.base);
-                next += 63 * 8;
+                    if ((bits & 1) && inside(next + w * j)) expect(next + w * j, word(was, next + w * j - e.vaddr) + p.base);
+                next += (w * 8 - 1) * w;
             }
         }
         elf::u64 differ = 0;
-        for (elf::u64 at = 0; at + 8 <= e.size; at += 8) if (word(was, at) != word(now, at)) ++differ;
-        for (elf::u64 at = e.size & ~elf::u64{7}; at < e.size; ++at) if (was[at] != now[at]) ++differ;
+        for (elf::u64 at = 0; at + w <= e.size; at += w) if (word(was, at) != word(now, at)) ++differ;
+        for (elf::u64 at = e.size & ~(w - 1); at < e.size; ++at) if (was[at] != now[at]) ++differ;
         if (wrong != 0 || differ != written) {
             c.fail("a placed segment is not its file bytes with the relative relocations applied for the base (SPEC 12.4)");
             return;
@@ -243,20 +293,25 @@ extern "C" int okld_check(const void* bytes, okld_size n, okld_name_test known_k
     if (!v.dynamic_ph) c.fail("has no dynamic section: an image is linked -shared or -pie");
     if (v.dynamic(elf::dt_textrel, ~0ull) != ~0ull || (v.dynamic(elf::dt_flags) & elf::df_textrel))
         c.fail("relocates its text (SPEC 12.2: no text relocation)");
-    if (v.dynamic(elf::dt_rel, ~0ull) != ~0ull) c.fail("uses REL relocations; an image uses RELA (SPEC 12.2)");
+    if (v.dynamic(elf::dt_rel, ~0ull) != ~0ull)
+        c.fail(v.wide ? "uses REL relocations; an image uses RELA (SPEC 12.2)"
+                      : "uses REL relocations; an image uses RELA (SPEC 12.2; link an i386 image with -z rela)");
 
     // Relocation types.
     auto types = [&](elf::i64 tag, elf::i64 size_tag) {
         const auto at = v.offset_of(v.dynamic(tag, ~0ull));
         const auto bytes_ = v.dynamic(size_tag);
         if (at == ~0ull || bytes_ == 0) return;
-        const auto* r = v.at<elf::rela>(at, bytes_ / sizeof(elf::rela));
-        if (!r) { c.fail("relocations beyond the file"); return; }
-        for (size k = 0; k < bytes_ / sizeof(elf::rela); ++k) {
-            const auto t = elf::r_type(r[k].info);
+        if (!v.at<unsigned char>(at, bytes_)) { c.fail("relocations beyond the file"); return; }
+        const auto n = v.relocation_count(tag, size_tag);
+        for (size k = 0; k < n; ++k) {
+            const auto t = elf::r_type(v.relocation(tag, k).info);
             const bool ok = v.eh->machine == elf::em_x86_64
                 ? (t == elf::r_x86_64_none || t == elf::r_x86_64_64 || t == elf::r_x86_64_glob_dat
                    || t == elf::r_x86_64_jump_slot || t == elf::r_x86_64_relative)
+                : v.eh->machine == elf::em_386
+                ? (t == elf::r_386_none || t == elf::r_386_32 || t == elf::r_386_glob_dat
+                   || t == elf::r_386_jmp_slot || t == elf::r_386_relative)
                 : (t == elf::r_aarch64_none || t == elf::r_aarch64_abs64 || t == elf::r_aarch64_glob_dat
                    || t == elf::r_aarch64_jump_slot || t == elf::r_aarch64_relative);
             if (!ok) {
@@ -271,15 +326,15 @@ extern "C" int okld_check(const void* bytes, okld_size n, okld_name_test known_k
     types(elf::dt_jmprel, elf::dt_pltrelsz);
 
     // Imports: kal_* that the specification declares, or another image's.
-    const auto* syms = v.symbols();
     const auto count = v.symbol_count();
-    for (size k = 1; syms && k < count; ++k) {
-        if (syms[k].shndx != elf::shn_undef || !syms[k].name) continue;
-        const char* name = v.string(syms[k].name);
+    elf::sym sk{};
+    for (size k = 1; k < count && v.symbol(k, sk); ++k) {
+        if (sk.shndx != elf::shn_undef || !sk.name) continue;
+        const char* name = v.string(sk.name);
         if (!name || !*name) continue;
         const bool kal = starts(name, "kal_") && (!known_kal || known_kal(name, ctx));
         const bool other = exported_elsewhere && exported_elsewhere(name, ctx);
-        if (!kal && !other && elf::st_bind(syms[k].info) != elf::stb_weak) {
+        if (!kal && !other && elf::st_bind(sk.info) != elf::stb_weak) {
             sentence s(why, sizeof why);
             s << "imports '" << name << "', which is neither a name openkal declares nor one another image exports (SPEC 12.2)";
             c.fail(why);
@@ -348,6 +403,24 @@ extern "C" int okld_set_requirements(void* bytes, okld_size n, okld_u64 interfac
 }
 
 // --- the symbols of an image's code and data (0.2) -----------------------------
+namespace {
+// A section header, widened; false beyond the file.
+bool section(const okld::view& v, unsigned i, okld::elf::shdr& out) {
+    using namespace okld;
+    if (v.wide) {
+        const auto* sh = v.at<elf::shdr>(v.eh->shoff + static_cast<elf::u64>(i) * sizeof(elf::shdr));
+        if (!sh) return false;
+        out = *sh;
+        return true;
+    }
+    const auto* sh = v.at<elf::shdr32>(v.eh->shoff + static_cast<elf::u64>(i) * sizeof(elf::shdr32));
+    if (!sh) return false;
+    out = elf::shdr{ sh->name, sh->type, sh->flags, sh->addr, sh->offset, sh->size, sh->link, sh->info,
+                     sh->addralign, sh->entsize };
+    return true;
+}
+}  // namespace
+
 extern "C" okld_u64 okld_symbols(const void* bytes, okld_size size,
                                  void (*each)(okld_u64, okld_u64, const char*, void*), void* ctx) {
     using namespace okld;
@@ -356,28 +429,31 @@ extern "C" okld_u64 okld_symbols(const void* bytes, okld_size size,
     if (!bytes || !each || !open(bytes, size, v, why, sizeof why)) return 0;
     // The section table's symbol table, with its string table; else the
     // dynamic one, whose names are the exports alone.
-    const elf::sym* syms = nullptr;
+    elf::u64 table = ~0ull;
     elf::u64 count = 0;
     const char* strings = nullptr;
     elf::u64 strings_size = 0;
-    if (v.eh->shoff && v.eh->shentsize == sizeof(elf::shdr)) {
-        const auto* sh = v.at<elf::shdr>(v.eh->shoff, v.eh->shnum);
-        for (unsigned i = 0; sh && i < v.eh->shnum && !syms; ++i) {
-            if (sh[i].type != elf::sht_symtab || sh[i].link >= v.eh->shnum) continue;
-            const auto& str = sh[sh[i].link];
-            const auto n = sh[i].size / sizeof(elf::sym);
-            const auto* t = v.at<elf::sym>(sh[i].offset, n);
+    const elf::u64 shentsize = v.wide ? sizeof(elf::shdr) : 40;
+    if (v.eh->shoff && v.eh->shentsize == shentsize) {
+        for (unsigned i = 0; i < v.eh->shnum && table == ~0ull; ++i) {
+            elf::shdr sh{}, str{};
+            if (!section(v, i, sh) || sh.type != elf::sht_symtab || sh.link >= v.eh->shnum || !section(v, sh.link, str))
+                continue;
+            const auto n = sh.size / v.symbol_size();
             const auto* s = v.at<char>(str.offset, str.size);
-            if (t && s) { syms = t; count = n; strings = s; strings_size = str.size; }
+            if (v.at<unsigned char>(sh.offset, n * v.symbol_size()) && s) {
+                table = sh.offset; count = n; strings = s; strings_size = str.size;
+            }
         }
     }
-    if (!syms) {
-        syms = v.symbols();
-        count = syms ? v.symbol_count() : 0;
+    if (table == ~0ull) {
+        table = v.offset_of(v.dynamic(elf::dt_symtab, ~0ull));
+        count = table == ~0ull ? 0 : v.symbol_count();
     }
     okld_u64 given = 0;
     for (elf::u64 k = 0; k < count; ++k) {
-        const auto& s = syms[k];
+        elf::sym s{};
+        if (!v.symbol_at(table, k, s)) break;
         const unsigned type = s.info & 0xf;
         if ((type != 1 /* STT_OBJECT */ && type != 2 /* STT_FUNC */) || s.value == 0
             || s.shndx == elf::shn_undef || s.shndx == elf::shn_abs) continue;

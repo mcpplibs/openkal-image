@@ -39,7 +39,7 @@ aarch64/libdep.okso
 ```
 
 An architecture's directory is named in the manifest; `okld bundle` names it after the
-architecture (`x86_64`, `aarch64`). Version 1 holds images and the two manifest members.
+architecture (`x86_64`, `aarch64`, `i686`). Version 1 holds images and the two manifest members.
 A program's data files are delivered beside the okb (in the package it is part of); a view
 of files inside an okb, through the loader, is reserved for a later version, which the
 manifest's `okb` number distinguishes.

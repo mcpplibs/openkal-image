@@ -52,6 +52,7 @@ void enter_image(void* p) {
     b.fn(b.arg);
 }
 
+#if OKRUN_HAS_TASK
 OKRUN_IMAGE_ABI int callback_kal_task_start(image_entry fn, void* arg, struct kal_task* out) {
     auto* b = static_cast<box*>(kal_alloc(sizeof(box), alignof(box)));
     if (!b) return kal_err_no_memory;
@@ -69,6 +70,7 @@ OKRUN_IMAGE_ABI int callback_kal_task_start_sized(image_entry fn, void* arg, kal
     if (rc != kal_ok) kal_free(b, sizeof(box), alignof(box));
     return rc;
 }
+#endif  // OKRUN_HAS_TASK
 
 // The image's own arguments and name (SPEC 12.3), answered by the runner.
 kal_intptr give(const char* v, kal_uintptr n, char* out, kal_uintptr cap) {
@@ -224,3 +226,42 @@ void* space_props_binding() { return nullptr; }
 #endif
 
 }  // namespace okrun
+
+// --- the names a runner binds, and a call's floating-point state: both runners' (0.6.3) ----
+
+using namespace okrun;
+
+extern "C" const char* const* okrun_names(unsigned long* count) {
+    static const char* names[256];
+    static unsigned long n = 0;
+    if (n == 0) {
+        unsigned long k = 0;
+        const binding* t = bindings(k);
+        for (unsigned long i = 0; i < k && n < 256; ++i) names[n++] = t[i].name;
+        t = space_bindings(k);
+        for (unsigned long i = 0; t && i < k && n < 256; ++i) names[n++] = t[i].name;
+    }
+    if (count) *count = n;
+    return names;
+}
+
+// A NAME'S SLOT, from a hash under which no two of the surface's names share
+// one (build.mcpp, 0.4): one name compared, where every name was.
+#include "surface_hash.inc"
+
+extern "C" void* okrun_resolve(const char* name) {
+    if (!name) return nullptr;
+    unsigned h = 2166136261u ^ kResolveSeed;
+    for (const char* c = name; *c; ++c) { h ^= static_cast<unsigned char>(*c); h *= 16777619u; }
+    const unsigned short slot = kResolveSlot[h % kResolveSlots];
+    if (slot == 0) return nullptr;
+    unsigned long n = 0;
+    const unsigned long i = slot - 1u;
+    const binding* t = i < kResolveMain ? bindings(n) : space_bindings(n);
+    const unsigned long k = i < kResolveMain ? i : i - kResolveMain;
+    if (!t || k >= n || !same(t[k].name, name)) return nullptr;
+    return t[k].address;
+}
+
+extern "C" unsigned long long okrun_call_enter(void) { return okrun_fp_enter(); }
+extern "C" void okrun_call_leave(unsigned long long state) { okrun_fp_leave(state); }

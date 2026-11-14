@@ -20,7 +20,7 @@ constexpr elf::u64 alignment = 65536;
 // The end of what the ELF describes: segments, program headers and sections.
 // What lies beyond it is a placement's stored segments (or nothing).
 elf::u64 content_end(const view& v) {
-    elf::u64 end = v.eh->phoff + static_cast<elf::u64>(v.eh->phnum) * sizeof(elf::phdr);
+    elf::u64 end = v.eh->phoff + static_cast<elf::u64>(v.eh->phnum) * v.eh->phentsize;
     for (unsigned k = 0; k < v.eh->phnum; ++k)
         if (v.ph[k].offset + v.ph[k].filesz > end) end = v.ph[k].offset + v.ph[k].filesz;
     if (v.eh->shoff) {
@@ -62,9 +62,7 @@ bool states_placement(const view& v) {
 }  // namespace
 
 bool names_a_symbol(const view& v, elf::u32 type) {
-    return v.eh->machine == elf::em_x86_64
-        ? type != elf::r_x86_64_none && type != elf::r_x86_64_relative
-        : type != elf::r_aarch64_none && type != elf::r_aarch64_relative;
+    return type != none_type(v) && type != relative_type(v);
 }
 
 bool read_placement(const view& v, placement& out) {
@@ -89,19 +87,15 @@ bool read_placement(const view& v, placement& out) {
 }
 
 void apply_relative(const view& v, elf::u64 base, unsigned char* seg, elf::u64 vaddr, elf::u64 filesz) {
-    const bool x86 = v.eh->machine == elf::em_x86_64;
-    const elf::u32 relative = x86 ? elf::r_x86_64_relative : elf::r_aarch64_relative;
-    auto inside = [&](elf::u64 at) { return at >= vaddr && at <= vaddr + filesz && filesz - (at - vaddr) >= 8; };
+    const elf::u32 relative = relative_type(v);
+    const elf::u64 w = v.word();
+    auto inside = [&](elf::u64 at) { return at >= vaddr && at <= vaddr + filesz && filesz - (at - vaddr) >= w; };
     auto table = [&](elf::i64 tag, elf::i64 size_tag) {
-        const auto at = v.offset_of(v.dynamic(tag, ~0ull));
-        const auto bytes = v.dynamic(size_tag);
-        if (at == ~0ull || bytes == 0) return;
-        const auto* r = v.at<elf::rela>(at, bytes / sizeof(elf::rela));
-        if (!r) return;
-        for (size k = 0; k < bytes / sizeof(elf::rela); ++k) {
-            if (elf::r_type(r[k].info) != relative || !inside(r[k].offset)) continue;
-            const elf::u64 value = base + static_cast<elf::u64>(r[k].addend);
-            copy(seg + (r[k].offset - vaddr), &value, 8);
+        const auto n = v.relocation_count(tag, size_tag);
+        for (size k = 0; k < n; ++k) {
+            const auto r = v.relocation(tag, k);
+            if (elf::r_type(r.info) != relative || !inside(r.offset)) continue;
+            v.put_word(seg + (r.offset - vaddr), base + static_cast<elf::u64>(r.addend));
         }
     };
     table(elf::dt_rela, elf::dt_relasz);
@@ -109,25 +103,25 @@ void apply_relative(const view& v, elf::u64 base, unsigned char* seg, elf::u64 v
     const auto relr = v.offset_of(v.dynamic(elf::dt_relr, ~0ull));
     const auto relr_bytes = v.dynamic(elf::dt_relrsz);
     if (relr == ~0ull || relr_bytes == 0) return;
-    const auto* e = v.at<elf::u64>(relr, relr_bytes / 8);
+    const auto* e = v.at<unsigned char>(relr, relr_bytes);
     if (!e) return;
     auto add = [&](elf::u64 at) {
         if (!inside(at)) return;
-        elf::u64 value = 0;
-        copy(&value, seg + (at - vaddr), 8);
-        value += base;
-        copy(seg + (at - vaddr), &value, 8);
+        v.put_word(seg + (at - vaddr), v.word_of(seg + (at - vaddr)) + base);
     };
+    // A packed entry is a word of the class: an address, or a bitmap of the
+    // word's width less one naming the words after the last.
     elf::u64 next = 0;
-    for (size k = 0; k < relr_bytes / 8; ++k) {
-        if ((e[k] & 1) == 0) {
-            add(e[k]);
-            next = e[k] + 8;
+    for (size k = 0; k < relr_bytes / w; ++k) {
+        const elf::u64 entry = v.word_of(e + k * w);
+        if ((entry & 1) == 0) {
+            add(entry);
+            next = entry + w;
         } else {
-            elf::u64 bits = e[k] >> 1;
+            elf::u64 bits = entry >> 1;
             for (elf::u64 i = 0; bits; ++i, bits >>= 1)
-                if (bits & 1) add(next + 8 * i);
-            next += 63 * 8;
+                if (bits & 1) add(next + w * i);
+            next += (w * 8 - 1) * w;
         }
     }
 }

@@ -84,6 +84,44 @@ The runner now folds a relative name against the first directory's name ---
 name beneath it, which is matched against the supplied directories as an
 absolute one is. No other change.
 
+Version 0.6.3 builds a core runner where the implementation beneath it has no
+files, processes or threads --- a firmware's, such as openkal-uefi. One interface
+(`include/okrun.h`, `run/src/runner.h`, the bindings) has two runners, and
+`run/mcpp.toml` selects one by the interfaces the implementation provides
+(`cfg(interface = "openkal.fs")`, mcpp 2026.11.13.1): with `openkal.fs`,
+`openkal.process`, `openkal.task`, `openkal.random` and `openkal.map` the full
+runner (`run/src/full`), unchanged; without any of them the core runner
+(`run/src/core`). The core runner runs what the program carries, from memory:
+an image, a group of images, or an archive of them (`okrun_run_bytes`,
+`okrun_run_images`, `okrun_run_okb_bytes`), with the same admission --- the
+requirements note, the architecture, the signature --- and the same loader. It
+has no cache, no snapshot and no profiler, and `okrun_run_file` refuses with the
+reason. A name of an interface the implementation does not provide is absent to
+the image, so an image that imports it weakly runs (SPEC 12.4). openkal-run
+itself requires only `openkal.abort`, `openkal.env`, `openkal.exec`,
+`openkal.memory`, `openkal.stream` and `openkal.time`, and mcpp 2026.11.13.1.
+
+Version 0.6.3 also reads, checks, places and loads an i386 image (`ELFCLASS32`,
+`EM_386`; openkal 0.25.1, clauses 5.5 and 12.2), on an i386 runner only. libokld
+widens the file's header, program headers and dynamic table to their
+sixty-four bit forms when it opens one, and reads its symbols and relocations
+through accessors of the class, so one loader, one check and one placement
+serve both classes. The image states its addends (RELA, `-z rela`; i386's
+default REL is refused with that option named), and its packed relative
+relocations are of the four-byte word (a bitmap of 31 entries). The relocations
+a loader applies are `R_386_RELATIVE`, `R_386_32`, `R_386_GLOB_DAT` and
+`R_386_JMP_SLOT`. The runner enters an i386 image and its callbacks in the System
+V i386 convention (arguments on the stack, the stack aligned to sixteen bytes at
+a call), with the x87 control word `0x037F` and, where the processor has SSE,
+MXCSR `0x1F80`. An okb names the architecture `i686`. The object a debugger
+reads (`okrun --debugger`) is of the image's class: i386's retained link
+relocations are REL, whose addend is the word at the place, so the object holds
+each `R_386_32` and `R_386_PC32` word less the value the link resolved. An image
+of the row `i686-openkal`, built through openkal-platform 0.28.0 (C++23 with
+`import std`, an exception across a frame), runs under an okrun built for
+`i686-linux-musl` on an x86-64 Linux, and gdb stops at a line of it and unwinds
+into the runner, as for an x86-64 image (measured).
+
 ## An image
 
 ```sh

@@ -209,6 +209,43 @@ std::vector<Case> cases() {
             ++f.relocation().offset;exercise(f,false);
         }
     });
+    // An i386 image (0.6.3): ELF32 sections, symbols and REL link relocations,
+    // whose addend is the word the link resolved; the object holds the addend.
+    out.emplace_back("i386_rel_word_becomes_its_addend",[]{
+        Bytes b(1040,0);
+        auto& h=*reinterpret_cast<e::ehdr32*>(b.data());
+        auto* sh=reinterpret_cast<e::shdr32*>(b.data()+64);
+        h.ident[0]=0x7f;h.ident[1]='E';h.ident[2]='L';h.ident[3]='F';h.ident[4]=1;h.ident[5]=1;h.ident[6]=1;
+        h.type=e::et_dyn;h.machine=e::em_386;h.version=1;h.ehsize=52;h.shoff=64;h.shentsize=40;h.shnum=8;h.shstrndx=1;
+        std::string names(1,'\0');
+        auto name=[&](const char* s){unsigned at=names.size();names+=s;names+='\0';return at;};
+        sh[1]={name(".shstrtab"),3,0,0,576,0,0,0,1,0};
+        sh[2]={name(".text"),1,2,0x1000,768,32,0,0,16,0};
+        sh[3]={name(".strtab"),3,0,0,800,5,0,0,1,0};
+        sh[4]={name(".symtab"),2,0,0,832,32,3,1,4,16};
+        sh[5]={name(".debug_info"),1,0,0,896,8,0,0,4,0};
+        sh[6]={name(".rel.debug_info"),9,0,0,1024,16,4,5,4,8};
+        sh[7]={name(".bss"),8,2,0x2000,0,16,0,0,4,0};
+        sh[1].size=names.size();std::memcpy(b.data()+576,names.data(),names.size());
+        std::memcpy(b.data()+800,"\0foo",5);
+        const e::sym32 foo{1,0x1004,4,18,0,2};std::memcpy(b.data()+848,&foo,16);
+        const e::u32 absolute=0x1004+6, relative=0x1004-4-4;   // S+A with A=6; S+A-P with A=-4, P=4
+        std::memcpy(b.data()+896,&absolute,4);std::memcpy(b.data()+900,&relative,4);
+        const e::rel32 r[2]={{0,(1u<<8)|1},{4,(1u<<8)|2}};std::memcpy(b.data()+1024,r,16);
+        const Bytes before=b;
+        Heap heap;auto host=heap.host();void* out=nullptr;okld_size size=0;okld_why why{};
+        require(okld::debugger_image(b.data(),b.size(),0x40000000,&host,&out,&size,&why),why.text);
+        require(b==before,"builder mutated source image");
+        const auto* p=static_cast<const unsigned char*>(out);
+        const auto* oh=reinterpret_cast<const e::shdr32*>(p+64);
+        const auto* os=reinterpret_cast<const e::sym32*>(p+848);
+        e::u32 a0=0,a1=0;std::memcpy(&a0,p+896,4);std::memcpy(&a1,p+900,4);
+        require(reinterpret_cast<const e::ehdr32*>(p)->type==1,"ET_REL header");
+        require(oh[2].addr==0x40001000 && os->value==4 && os->shndx==2,"placed section, relative symbol");
+        require(a0==6 && a1==static_cast<e::u32>(-4),"the words hold their addends");
+        host.free(out,size,host.ctx);
+        require(heap.live.empty() && !heap.bad_release,"allocation leak or incorrect free size");
+    });
     out.emplace_back("none_relocation_has_no_target_write",[]{Fixture f;f.relocation().offset=~e::u64{0};f.relocation().info=0xffffffff00000000ull;exercise(f,true);});
     out.emplace_back("repeated_build_release",[]{for(int i=0;i<100;++i)exercise(Fixture(true),true);});
     return out;

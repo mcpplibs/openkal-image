@@ -1,14 +1,15 @@
 [package]
 namespace   = "mcpplibs"
 name        = "openkal-run"
-version     = "0.6.2"
+version     = "0.6.3"
 description = "libokrun: the runner's core --- an ok image's names bound to this process's one openkal implementation, in the image's calling convention, and its entry entered."
 license     = "Apache-2.0"
 authors     = ["mcpplibs"]
 repo        = "https://github.com/mcpplibs/openkal-image"
 # `[defaults]' (mcpp 2026.11.9.1, SPEC-002 §3.7); the implementation's
-# interfaces read by build.mcpp (MCPP_KERNEL_ABI_INTERFACES, 2026.11.10.1).
-mcpp        = ">=2026.11.10.1"
+# interfaces read by build.mcpp (MCPP_KERNEL_ABI_INTERFACES, 2026.11.10.1); the
+# runner's sources selected by them (`cfg(interface = ...)', 2026.11.13.1).
+mcpp        = ">=2026.11.13.1"
 # The runner binds an image's names to this process's one implementation of
 # openkal: whichever the graph has --- the consumer's, or the one its
 # platform adds --- else the default of the system below.
@@ -27,22 +28,32 @@ macos   = "openkal-macos@^0.23.0"
 windows = "openkal-windows@^0.21.0"
 'cfg(os = "freebsd")' = "openkal-freebsd@^0.1.0"
 
-# THE INTERFACES THE RUNNER ITSELF CALLS (0.6): an implementation that does not
-# provide one of them is refused when the graph is resolved. Every other
-# interface is bound where the implementation provides it (build.mcpp reads
-# its `provides-interfaces'), and an image that requires one it does not is
-# refused at load, naming it (SPEC 12.4). An implementation that states no list
-# is taken to provide every interface.
+# THE INTERFACES THE RUNNER ITSELF CALLS (0.6; 0.6.3 the core runner): an implementation that does
+# not provide one of them is refused when the graph is resolved. Every other interface is bound
+# where the implementation provides it (build.mcpp reads its `provides-interfaces'), and an image
+# that requires one it does not is refused at load, naming it (SPEC 12.4). An implementation that
+# states no list is taken to provide every interface.
 [kernel-abi]
 requires-interfaces = [
-    "openkal.abort", "openkal.stream", "openkal.memory", "openkal.env", "openkal.time",
-    "openkal.random", "openkal.fs", "openkal.process", "openkal.task", "openkal.exec",
-    "openkal.map",
+    "openkal.abort", "openkal.stream", "openkal.memory", "openkal.env", "openkal.time", "openkal.exec",
 ]
 
 [build]
-sources = ["src/okrun.cppm", "src/run.cpp", "src/bindings.cpp", "src/seal.cpp", "src/prof.cpp"]
+sources = ["src/okrun.cppm", "src/bindings.cpp", "src/adapters.cpp"]
 include_dirs = ["include"]
 flags = [
   { glob = "src/*.cpp", cxxflags = ["-fno-exceptions", "-fno-rtti"] },
+  { glob = "src/full/*.cpp", cxxflags = ["-fno-exceptions", "-fno-rtti"] },
+  { glob = "src/core/*.cpp", cxxflags = ["-fno-exceptions", "-fno-rtti"] },
 ]
+
+# ONE INTERFACE, TWO RUNNERS (0.6.3), chosen by what the implementation provides. The full runner
+# reads images from files, keeps a cache and snapshots, starts itself again and digests in
+# parallel; the core runner runs what the program carries, from memory --- on firmware, or any
+# implementation without files, processes or threads. Both answer the same C interface
+# (include/okrun.h).
+[target.'cfg(all(interface = "openkal.fs", interface = "openkal.process", interface = "openkal.task", interface = "openkal.random", interface = "openkal.map"))'.build]
+sources = ["src/full/*.cpp"]
+
+[target.'cfg(not(all(interface = "openkal.fs", interface = "openkal.process", interface = "openkal.task", interface = "openkal.random", interface = "openkal.map")))'.build]
+sources = ["src/core/*.cpp"]

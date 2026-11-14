@@ -38,7 +38,12 @@ native source-debugger compatibility on those systems.
 ## Image requirements and limits
 
 The debugger-object builder accepts little-endian ELF64 metadata for x86-64
-and AArch64. Embedded debug sections may use ELF zlib compression
+and AArch64, and ELF32 metadata for i386 (0.6.3). An i386 image's retained
+link relocations are REL: their addend is the word at the place, which the link
+has resolved, so the object holds each `R_386_32` and `R_386_PC32` word less the
+symbol's value (and, for `R_386_PC32`, plus the place), and the debugger adds
+its own. The image's run-time relocations (`.rela.dyn`, `.rela.plt`) are data in
+the object. Embedded debug sections may use ELF zlib compression
 (`SHF_COMPRESSED`); the loader expands them in the debugger object. The
 executable image and its persistent compressed bytes remain unchanged.
 

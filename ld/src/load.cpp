@@ -17,9 +17,11 @@ struct okld_module {
     const okld_host*  host = nullptr;
     unsigned char*    base = nullptr;
     elf::u64          span = 0;
-    const elf::phdr*  phdr = nullptr;         // within the mapped image, or `own_phdr'
-    elf::phdr*        own_phdr = nullptr;     // the program headers, copied when no segment holds them
-    elf::u32          phnum = 0;
+    // The program headers as the image states them, of its class: within the
+    // mapped image, or `own_phdr', a copy, when no segment holds them.
+    const void*       phdr = nullptr;
+    unsigned char*    own_phdr = nullptr;
+    elf::u32          phnum = 0, phentsize = 0;
     elf::u64          entry = 0;
     char              name[256] = {};
     okld_module*      needed[16] = {};
@@ -27,8 +29,9 @@ struct okld_module {
     int               references = 1;
     bool              initialised = false;
     bool              finalised = false;
-    // Within the mapped image, from its dynamic table.
-    const elf::sym*   symtab = nullptr;
+    // Within the mapped image, from its dynamic table, of the image's class.
+    bool                 wide = true;
+    const unsigned char* symtab = nullptr;
     const char*       strtab = nullptr;
     elf::u64          strsz = 0;
     const elf::u32*   hash = nullptr;         // DT_HASH
@@ -36,7 +39,7 @@ struct okld_module {
     elf::u64          init = 0, fini = 0, init_array = 0, init_arraysz = 0, fini_array = 0, fini_arraysz = 0;
     // The relocation tables, within the mapped image (okld_bound_imports).
     elf::u64          rela = ~0ull, relasz = 0, jmprel = ~0ull, pltrelsz = 0;
-    bool              x86 = false;
+    elf::u16          machine = 0;
     void*             debug_entry = nullptr;  // the GDB JIT record
     void*             debug_copy = nullptr;
     okld_size         debug_size = 0;
@@ -116,17 +119,41 @@ elf::u32 sysv_hash(const char* s) {
     return h;
 }
 
+// A symbol of a module's dynamic table, widened from its class.
+elf::sym symbol_of(const okld_module* m, elf::u32 index) {
+    if (m->wide) {
+        elf::sym s;
+        copy(&s, m->symtab + static_cast<elf::u64>(index) * sizeof(elf::sym), sizeof s);
+        return s;
+    }
+    elf::sym32 t;
+    copy(&t, m->symtab + static_cast<elf::u64>(index) * sizeof(elf::sym32), sizeof t);
+    return elf::sym{ t.name, t.info, t.other, t.shndx, t.value, t.size };
+}
+
+// A RELA relocation of a table in the mapped image, widened from its class.
+elf::rela relocation_of(const unsigned char* table, elf::u64 k, bool wide) {
+    if (wide) {
+        elf::rela r;
+        copy(&r, table + k * sizeof(elf::rela), sizeof r);
+        return r;
+    }
+    elf::rela32 r;
+    copy(&r, table + k * sizeof(elf::rela32), sizeof r);
+    return elf::rela{ r.offset, elf::r_info(r.info >> 8, r.info & 0xff), r.addend };
+}
+
 // An exported name of a module: defined, not local.
 void* lookup(const okld_module* m, const char* name) {
     auto defined = [&](elf::u32 index) -> void* {
-        const auto& s = m->symtab[index];
+        const auto s = symbol_of(m, index);
         if (s.shndx == elf::shn_undef || elf::st_bind(s.info) == elf::stb_local || !s.name) return nullptr;
         if (s.name >= m->strsz || !equal(m->strtab + s.name, name)) return nullptr;
         return s.shndx == elf::shn_abs ? reinterpret_cast<void*>(s.value) : m->base + s.value;
     };
     if (m->gnu_hash) {
         const elf::u32 nbuckets = m->gnu_hash[0], symoffset = m->gnu_hash[1], bloom = m->gnu_hash[2];
-        const auto* buckets = m->gnu_hash + 4 + bloom * 2;
+        const auto* buckets = m->gnu_hash + 4 + bloom * (m->wide ? 2 : 1);   // bloom words of the class
         const auto* chain = buckets + nbuckets;
         const elf::u32 h = gnu_hash(name);
         for (elf::u32 i = buckets[h % nbuckets]; i >= symoffset && i != 0; ++i) {
@@ -199,7 +226,7 @@ void withdraw(okld_module* m) {
 // Whether a relocation's symbol is one the module imports: named, and not
 // defined by it.
 bool imports(const okld_module* m, elf::u32 index) {
-    return index != 0 && m->symtab[index].shndx == elf::shn_undef;
+    return index != 0 && symbol_of(m, index).shndx == elf::shn_undef;
 }
 
 // EACH RELOCATION WRITES A WRITABLE SEGMENT, or the image is refused: a
@@ -214,11 +241,13 @@ enum class applying { all, named, imports };
 int relocate(okld_module* m, const view& v, const okld_host* host, const writable& w, applying what, okld_why* why) {
     const bool placed = what != applying::all;
     const elf::u64 b = reinterpret_cast<elf::u64>(m->base);
-    const bool x86 = v.eh->machine == elf::em_x86_64;
+    const elf::u16 machine = v.eh->machine;
+    const elf::u64 wsz = v.word();
+    auto put = [&](elf::u64 offset, elf::u64 value) { v.put_word(m->base + offset, value); };
     auto symbol_address = [&](elf::u32 index, bool& ok) -> elf::u64 {
         ok = true;
         if (index == 0) return 0;
-        const auto& s = m->symtab[index];
+        const auto s = symbol_of(m, index);
         if (s.shndx != elf::shn_undef) return s.shndx == elf::shn_abs ? s.value : b + s.value;
         const char* name = s.name < m->strsz ? m->strtab + s.name : "";
         if (void* p = host->resolve ? host->resolve(name, host->ctx) : nullptr) return reinterpret_cast<elf::u64>(p);
@@ -232,37 +261,48 @@ int relocate(okld_module* m, const view& v, const okld_host* host, const writabl
     auto apply = [&](elf::i64 tag, elf::i64 size_tag) -> bool {
         const elf::u64 at = v.dynamic(tag, ~0ull), bytes = v.dynamic(size_tag);
         if (at == ~0ull || bytes == 0) return true;
-        const auto* r = reinterpret_cast<const elf::rela*>(m->base + at);
-        for (elf::u64 k = 0; k < bytes / sizeof(elf::rela); ++k) {
-            if (elf::r_type(r[k].info) != (x86 ? elf::r_x86_64_none : elf::r_aarch64_none)
-                && !w.holds(r[k].offset, 8)) {
+        const unsigned char* table = m->base + at;
+        for (elf::u64 k = 0; k < bytes / v.relocation_size(); ++k) {
+            const elf::rela r = relocation_of(table, k, v.wide);
+            const elf::u32 t = elf::r_type(r.info);
+            if (t != none_type(v) && !w.holds(r.offset, wsz)) {
                 say(why, "a relocation writes outside the image's writable segments (SPEC 12.2)");
                 return false;
             }
-            auto* where = reinterpret_cast<elf::u64*>(m->base + r[k].offset);
-            const elf::u32 t = elf::r_type(r[k].info);
             // AT ITS BASE THE RELATIVE ONES ARE ALREADY IN THE BYTES (SPEC
             // 12.3, openkal 0.23): what remains names a symbol.
             if (placed && !names_a_symbol(v, t)) continue;
-            if (what == applying::imports && !imports(m, elf::r_sym(r[k].info))) continue;
+            if (what == applying::imports && !imports(m, elf::r_sym(r.info))) continue;
             bool ok = true;
-            if (x86) {
+            const elf::u64 addend = static_cast<elf::u64>(r.addend);
+            if (machine == elf::em_x86_64) {
                 switch (t) {
                     case elf::r_x86_64_none: break;
-                    case elf::r_x86_64_relative: *where = b + static_cast<elf::u64>(r[k].addend); break;
-                    case elf::r_x86_64_64: *where = symbol_address(elf::r_sym(r[k].info), ok) + static_cast<elf::u64>(r[k].addend); break;
+                    case elf::r_x86_64_relative: put(r.offset, b + addend); break;
+                    case elf::r_x86_64_64: put(r.offset, symbol_address(elf::r_sym(r.info), ok) + addend); break;
                     case elf::r_x86_64_glob_dat:
-                    case elf::r_x86_64_jump_slot: *where = symbol_address(elf::r_sym(r[k].info), ok); break;
+                    case elf::r_x86_64_jump_slot: put(r.offset, symbol_address(elf::r_sym(r.info), ok)); break;
+                    default: say(why, "a relocation type the format does not allow (SPEC 12.2)"); return false;
+                }
+            } else if (machine == elf::em_386) {
+                // i386 with explicit addends (-z rela): GLOB_DAT and JMP_SLOT
+                // hold the symbol's address, as on x86-64.
+                switch (t) {
+                    case elf::r_386_none: break;
+                    case elf::r_386_relative: put(r.offset, b + addend); break;
+                    case elf::r_386_32: put(r.offset, symbol_address(elf::r_sym(r.info), ok) + addend); break;
+                    case elf::r_386_glob_dat:
+                    case elf::r_386_jmp_slot: put(r.offset, symbol_address(elf::r_sym(r.info), ok)); break;
                     default: say(why, "a relocation type the format does not allow (SPEC 12.2)"); return false;
                 }
             } else {
                 switch (t) {
                     case elf::r_aarch64_none: break;
-                    case elf::r_aarch64_relative: *where = b + static_cast<elf::u64>(r[k].addend); break;
+                    case elf::r_aarch64_relative: put(r.offset, b + addend); break;
                     case elf::r_aarch64_abs64:
                     case elf::r_aarch64_glob_dat:
                     case elf::r_aarch64_jump_slot:
-                        *where = symbol_address(elf::r_sym(r[k].info), ok) + static_cast<elf::u64>(r[k].addend); break;
+                        put(r.offset, symbol_address(elf::r_sym(r.info), ok) + addend); break;
                     default: say(why, "a relocation type the format does not allow (SPEC 12.2)"); return false;
                 }
             }
@@ -275,22 +315,25 @@ int relocate(okld_module* m, const view& v, const okld_host* host, const writabl
     // at its base.
     if (const elf::u64 at = v.dynamic(elf::dt_relr, ~0ull); !placed && at != ~0ull) {
         const elf::u64 bytes = v.dynamic(elf::dt_relrsz);
-        const auto* e = reinterpret_cast<const elf::u64*>(m->base + at);
+        const unsigned char* e = m->base + at;
         elf::u64 next = 0;   // the offset the first bit of a bitmap entry names
         bool ok = true;
-        for (elf::u64 k = 0; ok && k < bytes / 8; ++k) {
-            if ((e[k] & 1) == 0) {
-                ok = w.holds(e[k], 8);
-                if (ok) *reinterpret_cast<elf::u64*>(m->base + e[k]) += b;
-                next = e[k] + 8;
+        auto add = [&](elf::u64 offset) {
+            ok = w.holds(offset, wsz);
+            if (ok) put(offset, v.word_of(m->base + offset) + b);
+        };
+        // An entry is a word of the class: an address, or a bitmap of the
+        // word's width less one.
+        for (elf::u64 k = 0; ok && k < bytes / wsz; ++k) {
+            const elf::u64 entry = v.word_of(e + k * wsz);
+            if ((entry & 1) == 0) {
+                add(entry);
+                next = entry + wsz;
             } else {
-                elf::u64 bits = e[k] >> 1;
-                for (elf::u64 i = 0; ok && bits; ++i, bits >>= 1) {
-                    if (!(bits & 1)) continue;
-                    ok = w.holds(next + 8 * i, 8);
-                    if (ok) *reinterpret_cast<elf::u64*>(m->base + next + 8 * i) += b;
-                }
-                next += 63 * 8;
+                elf::u64 bits = entry >> 1;
+                for (elf::u64 i = 0; ok && bits; ++i, bits >>= 1)
+                    if (bits & 1) add(next + wsz * i);
+                next += (wsz * 8 - 1) * wsz;
             }
         }
         if (!ok) {
@@ -307,7 +350,7 @@ namespace {
 // A placed module's region, its own program headers and its record.
 void discard(okld_module* m) {
     const okld_host* host = m->host;
-    if (m->own_phdr) host->free(m->own_phdr, sizeof(elf::phdr) * m->phnum, host->ctx);
+    if (m->own_phdr) host->free(m->own_phdr, static_cast<okld_size>(m->phentsize) * m->phnum, host->ctx);
     host->release(m->base, m->span, host->ctx);
     host->free(m, sizeof *m, host->ctx);
 }
@@ -344,15 +387,15 @@ void mark_named(const view& v, elf::u64 from, elf::u64 to, named_blocks& out) {
     out.count = (round_up(to, block_size) - out.first) / block_size;
     if (out.count > 1024) out.count = 1024;
     auto mark = [&](elf::i64 tag, elf::i64 size_tag) {
-        const auto at = v.offset_of(v.dynamic(tag, ~0ull));
-        const auto n = v.dynamic(size_tag);
-        const auto* r = at == ~0ull ? nullptr : v.at<elf::rela>(at, n / sizeof(elf::rela));
-        for (size k = 0; r && k < n / sizeof(elf::rela); ++k) {
-            if (!names_a_symbol(v, elf::r_type(r[k].info))) continue;
-            const elf::u64 o = r[k].offset;
-            if (o + 8 <= from || o >= to) continue;
+        const auto n = v.relocation_count(tag, size_tag);
+        const elf::u64 w = v.word();
+        for (size k = 0; k < n; ++k) {
+            const auto r = v.relocation(tag, k);
+            if (!names_a_symbol(v, elf::r_type(r.info))) continue;
+            const elf::u64 o = r.offset;
+            if (o + w <= from || o >= to) continue;
             const elf::u64 a = (o > out.first ? o - out.first : 0) / block_size;
-            const elf::u64 b = (o + 7 - out.first) / block_size;
+            const elf::u64 b = (o + w - 1 - out.first) / block_size;
             if (a < out.count) out.named[a] = true;
             if (b < out.count) out.named[b] = true;
         }
@@ -672,20 +715,23 @@ int load_image(const void* bytes, okld_size n, const char* name, const okld_host
     }
     m->entry = v.eh->entry;
     m->phnum = v.eh->phnum;
+    m->phentsize = v.eh->phentsize;
+    const elf::u64 phbytes = static_cast<elf::u64>(m->phentsize) * m->phnum;
     for (unsigned k = 0; k < v.eh->phnum; ++k)
-        if (v.ph[k].type == elf::pt_load && v.eh->phoff >= v.ph[k].offset && v.eh->phoff < v.ph[k].offset + v.ph[k].filesz)
-            m->phdr = reinterpret_cast<const elf::phdr*>(m->base + v.ph[k].vaddr + (v.eh->phoff - v.ph[k].offset));
+        if (v.ph[k].type == elf::pt_load && v.eh->phoff >= v.ph[k].offset && v.eh->phoff + phbytes <= v.ph[k].offset + v.ph[k].filesz)
+            m->phdr = m->base + v.ph[k].vaddr + (v.eh->phoff - v.ph[k].offset);
     // THE LOADER KEEPS NO POINTER INTO THE CALLER'S BYTES, which the caller may
     // release once the image is loaded: program headers no segment holds are
-    // copied into the record.
+    // copied into the record, as the image states them.
     if (!m->phdr) {
-        m->own_phdr = static_cast<elf::phdr*>(host->alloc(sizeof(elf::phdr) * m->phnum, host->ctx));
+        m->own_phdr = static_cast<unsigned char*>(host->alloc(phbytes, host->ctx));
         if (!m->own_phdr) { say(why, "no memory for the image's program headers"); host->release(m->base, m->span, host->ctx); host->free(m, sizeof *m, host->ctx); return -1; }
-        copy(m->own_phdr, v.ph, sizeof(elf::phdr) * m->phnum);
+        copy(m->own_phdr, v.data + v.eh->phoff, phbytes);
         m->phdr = m->own_phdr;
     }
 
-    m->symtab = reinterpret_cast<const elf::sym*>(m->base + v.dynamic(elf::dt_symtab));
+    m->wide = v.wide;
+    m->symtab = m->base + v.dynamic(elf::dt_symtab);
     m->strtab = reinterpret_cast<const char*>(m->base + v.dynamic(elf::dt_strtab));
     m->strsz = v.dynamic(elf::dt_strsz);
     if (const elf::u64 h = v.dynamic(elf::dt_hash, ~0ull); h != ~0ull) m->hash = reinterpret_cast<const elf::u32*>(m->base + h);
@@ -695,7 +741,7 @@ int load_image(const void* bytes, okld_size n, const char* name, const okld_host
     m->fini_array = v.dynamic(elf::dt_fini_array); m->fini_arraysz = v.dynamic(elf::dt_fini_arraysz);
     m->rela = v.dynamic(elf::dt_rela, ~0ull); m->relasz = v.dynamic(elf::dt_relasz);
     m->jmprel = v.dynamic(elf::dt_jmprel, ~0ull); m->pltrelsz = v.dynamic(elf::dt_pltrelsz);
-    m->x86 = v.eh->machine == elf::em_x86_64;
+    m->machine = v.eh->machine;
 
     const applying what = !placed ? applying::all : src->snapshot ? applying::imports : applying::named;
     if (relocate(m, v, host, w, what, why) != 0) { discard(m); return -1; }
@@ -798,22 +844,26 @@ extern "C" int okld_bound_imports(okld_module* m, int (*each)(void*, okld_u64, c
     const elf::u64 tables[2][2] = { { m->rela, m->relasz }, { m->jmprel, m->pltrelsz } };
     for (const auto& t : tables) {
         if (t[0] == ~0ull) continue;
-        const auto* r = reinterpret_cast<const elf::rela*>(m->base + t[0]);
-        for (elf::u64 k = 0; k < t[1] / sizeof(elf::rela); ++k) {
-            const elf::u32 index = elf::r_sym(r[k].info);
+        const unsigned char* table = m->base + t[0];
+        const elf::u64 entry = m->wide ? sizeof(elf::rela) : sizeof(elf::rela32);
+        for (elf::u64 k = 0; k < t[1] / entry; ++k) {
+            const elf::rela r = relocation_of(table, k, m->wide);
+            const elf::u32 index = elf::r_sym(r.info);
             if (!imports(m, index)) continue;
-            const auto& sym = m->symtab[index];
+            const auto sym = symbol_of(m, index);
             const char* name = sym.name < m->strsz ? m->strtab + sym.name : "";
             elf::u64 value = 0;
             if (void* p = host->resolve ? host->resolve(name, host->ctx) : nullptr) value = reinterpret_cast<elf::u64>(p);
             for (okld_size n = 0; value == 0 && n < m->needed_count; ++n)
                 if (void* p = lookup(m->needed[n], name)) value = reinterpret_cast<elf::u64>(p);
             // The addend counts where the relocation adds it: every type but
-            // x86-64's GLOB_DAT and JUMP_SLOT.
-            const elf::u32 type = elf::r_type(r[k].info);
-            const bool adds = !m->x86 || (type != elf::r_x86_64_glob_dat && type != elf::r_x86_64_jump_slot);
-            if (value != 0 && adds) value += static_cast<elf::u64>(r[k].addend);
-            if (const int stop = each(m->base + r[k].offset, value, name, ctx)) return stop;
+            // GLOB_DAT and JUMP_SLOT of x86-64 and of i386.
+            const elf::u32 type = elf::r_type(r.info);
+            const bool adds = m->machine == elf::em_x86_64 ? type != elf::r_x86_64_glob_dat && type != elf::r_x86_64_jump_slot
+                            : m->machine == elf::em_386    ? type != elf::r_386_glob_dat && type != elf::r_386_jmp_slot
+                                                           : true;
+            if (value != 0 && adds) value += static_cast<elf::u64>(r.addend);
+            if (const int stop = each(m->base + r.offset, value, name, ctx)) return stop;
         }
     }
     return 0;
