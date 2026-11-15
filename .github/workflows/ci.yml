@@ -310,6 +310,15 @@ jobs:
             | grep -q "argc as kal_env_arg_count = 2") \
             || { echo "::error::a relative image name with .. was not opened"; exit 1; }
           echo "  ok  a relative name that climbs opens the image"
+          # A NAME WITH EMPTY COMPONENTS (0.6.4): `//' and `/./' in an absolute
+          # name, as a build system's joined paths carry them, fold lexically.
+          abs="$PWD"; [ "$RUNNER_OS" = Windows ] && abs=$(cygpath -m "$PWD")
+          "$OKRUN" "$abs//out/./$a//hello.oke" one | tr -d '\r' | grep -q "argc as kal_env_arg_count = 2" \
+            || { echo "::error::an absolute image name with // was not opened"; exit 1; }
+          (cd rel/below && "$OKRUN" "..//..//out/$a/hello.oke" one | tr -d '\r' \
+            | grep -q "argc as kal_env_arg_count = 2") \
+            || { echo "::error::a relative image name with // was not opened"; exit 1; }
+          echo "  ok  a name with empty components opens the image"
           n=$("$OKRUN" "out/$a/needed.oke" | tr -d '\r')
           echo "$n"
           grep -q "twice(21) = 42, next_value() = 41" <<<"$n" || { echo "::error::an image another needs"; exit 1; }
