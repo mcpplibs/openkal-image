@@ -122,6 +122,15 @@ of the row `i686-openkal`, built through openkal-platform 0.28.0 (C++23 with
 `i686-linux-musl` on an x86-64 Linux, and gdb stops at a line of it and unwinds
 into the runner, as for an x86-64 image (measured).
 
+Version 0.6.4 folds every image name lexically before it is matched, an
+absolute one as well as a relative one: an empty component (`//`, as a build
+system's joined paths carry it) and `.` are dropped, and `..` removes the
+component before it. An absolute name was matched as it stood, so `/a//b.oke`
+was refused. The release workflow starts when a release is published, so every
+release carries its binaries (0.6.3 was published without them), and it adds
+FreeBSD x86_64 and aarch64: static programs of the platform's hosted musl
+identity, built on Linux and run in a FreeBSD machine before they are attached.
+
 ## An image
 
 ```sh

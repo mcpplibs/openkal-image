@@ -68,47 +68,71 @@ void* allocate(okld_size n, void*) { return kal_alloc(n, 16); }
 void deallocate(void* p, okld_size n, void*) { kal_free(p, n, 16); }
 
 // A name as openkal names things: the supplied directory that is the longest
-// prefix of it, and the rest. A relative name is folded against the first
-// directory's name --- `..' and `.' lexically, a symlink not resolved --- into
-// the absolute one beneath it and matched as that. It folds into `g_folded',
-// which outlives the call: the rest points into it.
+// prefix of it, and the rest. Every name is folded lexically before it is
+// matched --- empty components (`//'), `.' and `..' --- and a symlink is not
+// resolved. A relative name is first placed beneath the first directory's name.
+// It folds into `g_folded', which outlives the call: the rest points into it.
 bool separator(char c) { return c == '/' || c == '\\'; }
 char lower(char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; }
 
 char g_folded[1024];
 
-bool locate(const char* path, kal_dir& dir, const char*& rest) {
-    const char* name = path;
-    if (!(separator(path[0]) || (path[0] && path[1] == ':'))) {
+// The root of an absolute name: `/', or a drive's `X:/'. Zero: not absolute.
+unsigned long root_length(const char* p) {
+    if (separator(p[0])) return 1;
+    if (p[0] && p[1] == ':' && separator(p[2])) return 3;
+    return 0;
+}
+
+bool fold(const char* path) {
+    unsigned long at = 0, floor = 0;
+    const char* rest = path;
+    if (const unsigned long r = root_length(path)) {
+        for (unsigned long i = 0; i < r; ++i) g_folded[at++] = separator(path[i]) ? '/' : path[i];
+        rest = path + r;
+        floor = r;
+    } else {
+        kal_dir first{};
         char base[1024]; kal_uintptr blen = 0;
-        if (kal_fs_preopen(0, &dir, base, sizeof base, &blen) != kal_ok
+        if (kal_fs_preopen(0, &first, base, sizeof base, &blen) != kal_ok
             || blen == 0 || blen >= sizeof g_folded) return false;
-        unsigned long at = 0;
-        while (at < blen) { g_folded[at] = base[at]; ++at; }
-        if (!separator(g_folded[at - 1])) g_folded[at++] = '/';
-        // `..' may climb out of the first directory, to the root of what it
-        // then names: the whole tree, or a drive's. No higher.
-        unsigned long floor = at;
-        if (blen > 1 && separator(g_folded[0])) floor = 1;
-        else if (blen > 3 && g_folded[1] == ':' && separator(g_folded[2])) floor = 3;
-        for (const char* p = path; *p;) {
-            const char* s = p;
-            while (*p && !separator(*p)) ++p;
-            const unsigned long n = static_cast<unsigned long>(p - s);
-            while (separator(*p)) ++p;
-            if (n == 0 || (n == 1 && s[0] == '.')) continue;
-            if (n == 2 && s[0] == '.' && s[1] == '.') {
-                if (at <= floor) return false;
-                do --at; while (at > floor && !separator(g_folded[at - 1]));
-                continue;
-            }
-            if (at && !separator(g_folded[at - 1])) g_folded[at++] = '/';
-            if (at + n >= sizeof g_folded) return false;
-            for (unsigned long i = 0; i < n; ++i) g_folded[at++] = s[i];
+        base[blen] = 0;
+        if (root_length(base)) {
+            // The first directory's own name is folded too, then the relative
+            // name beneath it; `..' may climb to the root of what it names.
+            if (!fold(base)) return false;
+            while (g_folded[at]) ++at;
+            floor = root_length(g_folded);
+        } else {
+            // A first directory with no root: `..' may not climb out of it.
+            while (at < blen) { g_folded[at] = base[at]; ++at; }
+            if (!separator(g_folded[at - 1])) g_folded[at++] = '/';
+            floor = at;
         }
-        g_folded[at] = 0;
-        name = g_folded;
     }
+    for (const char* p = rest; *p;) {
+        const char* s = p;
+        while (*p && !separator(*p)) ++p;
+        const unsigned long n = static_cast<unsigned long>(p - s);
+        while (separator(*p)) ++p;
+        if (n == 0 || (n == 1 && s[0] == '.')) continue;
+        if (n == 2 && s[0] == '.' && s[1] == '.') {
+            if (at <= floor) return false;
+            do --at; while (at > floor && !separator(g_folded[at - 1]));
+            continue;
+        }
+        if (at > floor && !separator(g_folded[at - 1])) g_folded[at++] = '/';
+        if (at + n + 1 >= sizeof g_folded) return false;
+        for (unsigned long i = 0; i < n; ++i) g_folded[at++] = s[i];
+    }
+    if (at > floor && separator(g_folded[at - 1])) --at;
+    g_folded[at] = 0;
+    return true;
+}
+
+bool locate(const char* path, kal_dir& dir, const char*& rest) {
+    if (!fold(path)) return false;
+    const char* name = g_folded;
     unsigned long best = 0;
     bool found = false;
     for (kal_uintptr i = 0; i < kal_fs_preopen_count(); ++i) {

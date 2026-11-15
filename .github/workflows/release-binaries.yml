@@ -2,12 +2,16 @@ name: release binaries
 
 # okrun and okld as programs of each system and architecture, attached to a
 # release: what a machine without mcpp installs to run ok images (the
-# xim-pkgindex `okrun` package). Dispatched with the release's tag; each archive
+# xim-pkgindex `okrun` package). A published release starts it (0.6.4: 0.6.3 was
+# published without binaries because the dispatch was a separate step); a
+# dispatch with a tag rebuilds an earlier release under a new asset revision. Each archive
 # is `mcpp pack` of the tool, a static program on Linux, and carries its
 # mcpp-package.json, from which `mcpp emit xpkg --package` writes the index
 # entry.
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -30,18 +34,22 @@ permissions:
   contents: write
 
 env:
-  RELEASE_TAG: ${{ github.event.inputs.tag }}
+  RELEASE_TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
   ASSET_REVISION: ${{ github.event.inputs.asset_revision || '' }}
   MCPP_SOURCE_REF: ${{ github.event.inputs.mcpp_ref || vars.MCPP_SOURCE_REF || '' }}
   # 2026.11.10.1: openkal-run binds the interfaces its implementation provides.
   # mcpp_ref supplies the candidate until this release is installable.
-  MCPP_VERSION: 2026.11.13.1
+  # 2026.11.15.1: openkal-platform 0.28.0, the default platform below, requires
+  # 2026.11.14.1 or later.
+  MCPP_VERSION: 2026.11.15.1
   # The platform whose hosted arrangement the programs are built over, named by
   # the dispatch beside the tag: a tag's tools pin exact implementations, and the
   # platform is the one whose version group holds them (0.1.4: 0.18.0; 0.1.5:
   # 0.19.0, openkal-linux 0.19.0; 0.1.6: 0.19.1; 0.1.7: 0.19.2; 0.1.8: 0.20.0; 0.1.9: 0.20.1;
   # 0.3.0: 0.21.0; 0.3.1: 0.21.1; 0.4.2: 0.23.1; 0.4.3 and 0.4.4: 0.23.3).
-  PLATFORM_VERSION: ${{ github.event.inputs.platform }}
+  # A published release builds over the platform named here, which a release
+  # that changes the pinned implementations updates in the same commit.
+  PLATFORM_VERSION: ${{ github.event.inputs.platform || '0.28.0' }}
   XLINGS_VERSION: v2026.10.26.1
   XLINGS_NON_INTERACTIVE: '1'
 
@@ -63,6 +71,12 @@ jobs:
           - { os: ubuntu-24.04-arm, id: linux-aarch64,  pack: '--target aarch64-linux-musl --mode static' }
           - { os: macos-15,         id: macos-aarch64,  pack: '--target aarch64-macos' }
           - { os: windows-2022,     id: windows-x86_64, pack: '--target x86_64-windows-gnu' }
+          # FreeBSD (0.6.4): the musl identity of the platform's hosted
+          # arrangement, built on Linux (the runner's `built-as`), one static
+          # program, and run in a FreeBSD machine before it is attached. These
+          # are the programs a runner delivers into a FreeBSD guest.
+          - { os: ubuntu-24.04,     id: freebsd-x86_64,  pack: '--target x86_64-freebsd-musl --mode static',  vm: x86_64 }
+          - { os: ubuntu-24.04,     id: freebsd-aarch64, pack: '--target aarch64-freebsd-musl --mode static', vm: aarch64 }
     defaults:
       run:
         shell: bash
@@ -152,6 +166,7 @@ jobs:
           ls -l ../out
 
       - name: Each program runs here, from its package alone
+        if: ${{ !matrix.vm }}
         run: |
           python=python3; [ "$RUNNER_OS" = Windows ] && python=python
           tag="$RELEASE_TAG"
@@ -181,6 +196,29 @@ jobs:
             cat "$tool.out"
             grep -q "usage: $tool" "$tool.out" || { echo "::error::$tool did not run here"; exit 1; }
           done
+
+      - name: Unpacked for the FreeBSD machine
+        if: ${{ matrix.vm }}
+        run: |
+          mkdir -p vm
+          for tool in okrun okld okprof; do
+            unzip -q -o "out/$tool-$RELEASE_TAG$ASSET_SUFFIX-${{ matrix.id }}.zip" -d vm
+          done
+          ls vm
+      - name: Each program runs in FreeBSD, from its package alone
+        if: ${{ matrix.vm }}
+        uses: vmactions/freebsd-vm@v1
+        with:
+          arch: ${{ matrix.vm }}
+          usesh: true
+          run: |
+            uname -a
+            for pkg in vm/*/; do
+              tool=$(basename "$pkg" | cut -d- -f1)
+              "$pkg/$tool" > "$tool.out" 2>&1 || true
+              cat "$tool.out"
+              grep -q "usage: $tool" "$tool.out" || { echo "$tool did not run here"; exit 1; }
+            done
 
       - name: Debug the just-unpacked Linux runner
         if: matrix.id == 'linux-x86_64'
