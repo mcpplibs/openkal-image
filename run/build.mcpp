@@ -39,10 +39,30 @@ int main() {
     // box; every other name is the implementation's. Since 0.2 the runner
     // also answers openkal.prof and openkal.debug, which are a loader's (SPEC
     // 12.3), the word of interfaces (the implementation's and those two), and
-    // the program's end (where a measurement records what it measured).
+    // the program's end (where a measurement records what it measured). Since
+    // 0.7 the runner also answers the requests to end, which it took before the
+    // image could: an image that asks for them takes them over.
     std::set<std::string> own{ "kal_env_arg_count", "kal_env_arg", "kal_env_image", "kal_env_loader",
-                               "kal_interfaces", "kal_exit", "kal_abort" };
+                               "kal_interfaces", "kal_exit", "kal_abort", "kal_process_stop_requested" };
     const std::set<std::string> callbacks{ "kal_task_start", "kal_task_start_sized" };
+    // THE CALLS THAT WAIT (0.7): each returns only when another party acts ---
+    // a task, a program, a peer --- or a time passes, so a task that does not end
+    // is found in one of them. openkal.timeout names the operations that would
+    // otherwise wait without end, and its own forms of them wait up to a bound;
+    // the others wait by what they are (a context joined or a word waited upon,
+    // a lock another holds, a named pipe opened before its other end). Each is
+    // entered through a record of the call on the calling task's line, which a
+    // request to end writes (src/waits.cpp). An operation upon a file waits for
+    // a device, as every operation does, and is not among them.
+    const std::set<std::string> waits{
+        "kal_stream_read", "kal_stream_write", "kal_stream_flush", "kal_time_sleep",
+        "kal_fs_open", "kal_fs_lock", "kal_process_wait", "kal_task_join", "kal_task_wait",
+        "kal_net_accept", "kal_net_connect", "kal_net_connect_at",
+        "kal_datagram_recv_from", "kal_datagram_send_to",
+        "kal_timeout_read", "kal_timeout_write", "kal_timeout_accept", "kal_timeout_recv_from",
+        "kal_timeout_wait_process" };
+    // The interfaces a loader answers itself, whatever the implementation provides (SPEC 12.3).
+    const std::set<std::string> loaders{ "openkal.prof", "openkal.debug" };
     std::vector<std::string> main_names, space_names, groups;
     std::map<std::string, std::string> group_of;
     std::string group, line;
@@ -58,6 +78,18 @@ int main() {
         group_of[line] = group;
         (group == "openkal.space" ? space_names : main_names).push_back(line);
     }
+    // A name this runner treats as its own, as a callback or as a call that waits
+    // is one the specification has: a name it dropped or renamed would be bound
+    // as any other, without the treatment, and nothing would say so.
+    auto known = [&](const std::set<std::string>& names) {
+        for (const auto& n : names) {
+            if (group_of.contains(n)) continue;
+            std::printf("mcpp:warning=%s is not a name of %s\n", n.c_str(), surface.string().c_str());
+            return false;
+        }
+        return true;
+    };
+    if (!known(own) || !known(callbacks) || !known(waits)) return 1;
 
     // The interfaces the implementation provides; none stated is every one.
     std::set<std::string> provided;
@@ -82,11 +114,15 @@ int main() {
         // of the calls an image makes (okprof, 0.2) keeps its counts.
         for (std::size_t i = 0; i < names.size(); ++i) {
             const auto& n = names[i];
-            // A callback of an interface the implementation does not provide is absent, as
-            // its other names are (0.6.3: a context cannot be started where there are none).
-            o << (own.contains(n) ? "OKRUN_OWN(" :
-                  !provided.contains(group_of[n]) ? "OKRUN_ABSENT(" :
-                  callbacks.contains(n) ? "OKRUN_CALLBACK(" : "OKRUN_BIND(")
+            // A name of an interface the implementation does not provide is absent, a
+            // callback's (0.6.3: a context cannot be started where there are none) and a
+            // name the runner answers (0.7: no request to end where there are no programs)
+            // as well, except the loader's own interfaces, which it answers everywhere.
+            const std::string& g = group_of[n];
+            o << (!provided.contains(g) && !loaders.contains(g) ? "OKRUN_ABSENT(" :
+                  own.contains(n) ? "OKRUN_OWN(" :
+                  callbacks.contains(n) ? "OKRUN_CALLBACK(" :
+                  waits.contains(n) ? "OKRUN_WAIT(" : "OKRUN_BIND(")
               << n << ", " << i << ")\n";
         }
     };

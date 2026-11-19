@@ -38,18 +38,43 @@ struct counted<F, I> {
     }
 };
 
+// A CALL THAT WAITS (build.mcpp's `waits', 0.7): its name is on the calling
+// task's line while it waits, where the runner watches the requests to end
+// (src/waits.cpp), and counted as well where a measurement asked for calls.
+template <auto F, unsigned long I, bool Counted> struct waited;
+template <class R, class... A, R (*F)(A...), unsigned long I, bool Counted>
+struct waited<F, I, Counted> {
+    OKRUN_IMAGE_ABI static R call(A... a) {
+        const kal_u64 t0 = Counted ? kal_time_monotonic() : 0;
+        task_line* line = wait_begin(I);
+        if constexpr (returns_nothing<R>::value) {
+            F(a...);
+            wait_end(line);
+            if constexpr (Counted) record_call(I, kal_time_monotonic() - t0);
+        } else {
+            R r = F(a...);
+            wait_end(line);
+            if constexpr (Counted) record_call(I, kal_time_monotonic() - t0);
+            return r;
+        }
+    }
+};
+
 // A function the image passes to be entered as a new context: it is the
 // image's, so it is entered in the image's convention through a box.
 using image_entry = void (OKRUN_IMAGE_ABI*)(void*);
 struct box { image_entry fn; void* arg; };
 
 // The context is the image's from its start, in the convention's
-// floating-point state (SPEC 12.2).
+// floating-point state (SPEC 12.2), and has a line of its own until it ends
+// (0.7): returning from its entry is the only way a context ends.
 void enter_image(void* p) {
     const box b = *static_cast<box*>(p);
     kal_free(p, sizeof(box), alignof(box));
+    task_line* line = task_begin();
     okrun_fp_enter();
     b.fn(b.arg);
+    task_end(line);
 }
 
 #if OKRUN_HAS_TASK
@@ -117,6 +142,14 @@ OKRUN_IMAGE_ABI void own_kal_abort(const char* msg, kal_uintptr len) {
     profile_finish();
     kal_abort(msg, len);
 }
+#if OKRUN_HAS_PROCESS
+// THE IMAGE TAKES THE REQUESTS TO END OVER (0.7). The runner took them where it
+// entered the image (src/waits.cpp); from the image's first call they are the
+// image's to act on, as they would have been had no runner taken them, and a
+// request still writes the call each task waits in, before the image's word
+// counts it.
+OKRUN_IMAGE_ABI const kal_u32* own_kal_process_stop_requested(void) { return requests_taken(); }
+#endif
 OKRUN_IMAGE_ABI int own_kal_prof_active(void) { return profile_active() ? 1 : 0; }
 OKRUN_IMAGE_ABI int own_kal_prof_counter(const char* name, kal_uintptr len, const volatile kal_u64* cell) {
     return profile_counter(name, len, cell);
@@ -167,6 +200,7 @@ OKRUN_IMAGE_ABI int own_kal_prof_touch_end(void) {
 #define OKRUN_BIND(n, i)     { #n, reinterpret_cast<void*>(&present<&::n>::call) },
 #define OKRUN_OWN(n, i)      { #n, reinterpret_cast<void*>(&own_##n) },
 #define OKRUN_CALLBACK(n, i) { #n, reinterpret_cast<void*>(&callback_##n) },
+#define OKRUN_WAIT(n, i)     { #n, reinterpret_cast<void*>(&waited<&::n, i, false>::call) },
 // A name of an interface the implementation does not provide: listed, so that
 // every name keeps its position, and bound to nothing.
 #define OKRUN_ABSENT(n, i)   { #n, nullptr },
@@ -178,7 +212,9 @@ const binding g_table[] = {
 };
 
 #undef OKRUN_BIND
+#undef OKRUN_WAIT
 #define OKRUN_BIND(n, i)     { #n, reinterpret_cast<void*>(&counted<&::n, i>::call) },
+#define OKRUN_WAIT(n, i)     { #n, reinterpret_cast<void*>(&waited<&::n, i, true>::call) },
 const binding g_counted[] = {
 #include "surface.inc"
 };
@@ -190,9 +226,11 @@ static_assert(sizeof g_table / sizeof g_table[0] <= kProfiledNames, "the call co
 #undef OKRUN_BIND
 #undef OKRUN_OWN
 #undef OKRUN_CALLBACK
+#undef OKRUN_WAIT
 #define OKRUN_BIND(n, i)     { #n, reinterpret_cast<void*>(&present<&::n>::call) },
 #define OKRUN_OWN(n, i)      OKRUN_BIND(n, i)
 #define OKRUN_CALLBACK(n, i) OKRUN_BIND(n, i)
+#define OKRUN_WAIT(n, i)     OKRUN_BIND(n, i)
 const binding g_space[] = {
 #include "surface_space.inc"
 };

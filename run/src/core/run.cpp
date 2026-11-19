@@ -175,6 +175,8 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     g_state.name = name;
     g_state.carried = s.options && s.options->carried;
     g_state.started = true;
+    // As the full runner (0.7, src/waits.cpp): nothing where there are no processes or contexts.
+    watch_requests();
     okld_host& h = s.host;
     h.reserve = &reserve; h.publish = &publish; h.release = &release; h.map = nullptr;
     h.granularity = &granularity; h.resolve = &resolve;

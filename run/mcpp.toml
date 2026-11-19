@@ -39,7 +39,7 @@ requires-interfaces = [
 ]
 
 [build]
-sources = ["src/okrun.cppm", "src/bindings.cpp", "src/adapters.cpp"]
+sources = ["src/okrun.cppm", "src/bindings.cpp", "src/adapters.cpp", "src/waits.cpp"]
 include_dirs = ["include"]
 flags = [
   { glob = "src/*.cpp", cxxflags = ["-fno-exceptions", "-fno-rtti"] },

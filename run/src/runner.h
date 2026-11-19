@@ -89,6 +89,23 @@ int impl_prof_touch_end();
 kal_uintptr impl_debug_props();
 kal_intptr impl_debug_symbolize(kal_uintptr address, char* out, kal_uintptr cap, kal_uintptr* start);
 
+// --- the call each task of the image waits in, when the program is asked to end (0.7, src/waits.cpp)
+//
+// Where the image is entered the runner takes the program's requests to end and waits for them on
+// a task of its own (`watch_requests'). Each task of the image has a line, kept as it begins and
+// ends (`task_begin', `task_end', bindings.cpp) and by the entry of each call that waits
+// (`wait_begin', `wait_end'; build.mcpp's `waits'). A request writes the lines to the error stream
+// and is then acted on as before: the program ends as the request would have ended it, unless the
+// image took the requests over itself (`requests_taken', its `kal_process_stop_requested').
+struct task_line;
+void        watch_requests();
+task_line*  task_begin();
+void        task_end(task_line* line);
+// `index' is the call's position among the bound names (surface.inc); null where nothing watches.
+task_line*  wait_begin(unsigned long index);
+void        wait_end(task_line* line);
+const kal_u32* requests_taken();
+
 // --- a snapshot of an image's initialisers (0.4, src/seal.cpp) ---------------
 //
 // The bindings while they run: memory from an arena above the image's end
