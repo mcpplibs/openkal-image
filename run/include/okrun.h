@@ -21,6 +21,14 @@ struct okrun_options {
      * program, M3): the image's own name (kal_env_image) is that program's,
      * and so is what starts the same program again. */
     int                   carried;
+    /* The program that runs an image file named on its command line as okrun
+     * does, `<loader> [--require-signature] [--trust <hex>]... --argv0=<name>
+     * -- <image> [arguments...]' (0.7.1). An image this runner runs that starts
+     * an image file, or an okb, starts it through this program, with this
+     * runner's signature requirements, and the started image observes the
+     * argument vector its starter gave. Null, or `carried': nothing here can
+     * enter an image file, and its start is refused as kal_err_not_program. */
+    const char*           loader;
 };
 
 /* Runs an image that lies in memory. `name' is what the image is told its

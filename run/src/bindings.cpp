@@ -131,10 +131,13 @@ OKRUN_IMAGE_ABI kal_intptr own_kal_env_loader(char* out, kal_uintptr cap) {
 // THE LOADER'S OWN INTERFACES (SPEC 12.3, 0.2): openkal.prof and openkal.debug
 // are answered here, and the word of interfaces states them beside the
 // implementation's. The program's end is where a measurement writes what it
-// measured, so `kal_exit' and `kal_abort' pass through here first.
+// measured, so `kal_exit' and `kal_abort' pass through here first. An image
+// that ends the program ends it with its own tasks alone (0.7.1,
+// src/waits.cpp); an abort ends it at once.
 OKRUN_IMAGE_ABI kal_u64 own_kal_interfaces(void) { return own_interfaces(); }
 OKRUN_IMAGE_ABI void own_kal_exit(int status) {
     profile_phase("exit");
+    stop_watching();
     profile_finish();
     kal_exit(status);
 }
@@ -149,6 +152,15 @@ OKRUN_IMAGE_ABI void own_kal_abort(const char* msg, kal_uintptr len) {
 // request still writes the call each task waits in, before the image's word
 // counts it.
 OKRUN_IMAGE_ABI const kal_u32* own_kal_process_stop_requested(void) { return requests_taken(); }
+// A START OF A PROGRAM (0.7.1): an image file is entered by a loader rather
+// than handed to the system, which runs a file's bytes as its own program's
+// (src/full/run.cpp, `start_program').
+OKRUN_IMAGE_ABI int own_kal_process_spawn(const struct kal_spawn* how, const char* path, kal_uintptr path_len,
+                                          const char** argv, const kal_uintptr* argv_lens, kal_uintptr argc,
+                                          const char** envp, const kal_uintptr* envp_lens, kal_uintptr envc,
+                                          const struct kal_spawn_streams* streams, struct kal_process* out) {
+    return start_program(how, path, path_len, argv, argv_lens, argc, envp, envp_lens, envc, streams, out);
+}
 #endif
 OKRUN_IMAGE_ABI int own_kal_prof_active(void) { return profile_active() ? 1 : 0; }
 OKRUN_IMAGE_ABI int own_kal_prof_counter(const char* name, kal_uintptr len, const volatile kal_u64* cell) {

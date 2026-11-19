@@ -1,6 +1,7 @@
 #pragma once
 #include <openkal/types.h>
 #include <openkal/fs.h>
+#include <openkal/process.h>
 #include <openkal/prof.h>
 // OKRUN_HAS_<INTERFACE> and OKRUN_COMPILED_INTERFACES (build.mcpp, 0.6).
 #include "provided.inc"
@@ -66,6 +67,15 @@ kal_intptr symbolize(kal_uintptr address, char* out, kal_uintptr cap, kal_uintpt
 // A name as openkal names things: the supplied directory that is the longest
 // prefix of it, and the rest (src/run.cpp).
 bool locate_path(const char* path, kal_dir& dir, const char*& rest);
+// THE IMAGE'S START OF A PROGRAM (0.7.1): an image file or an okb is started
+// through the loader okrun_options names, checked first as the loader checks
+// it, so that a start that cannot happen is refused by its reason; any other
+// file is started by the implementation as given (src/full/run.cpp). The core
+// runner reads no file and starts every name as given.
+int start_program(const kal_spawn* how, const char* path, kal_uintptr path_len,
+                  const char** argv, const kal_uintptr* argv_lens, kal_uintptr argc,
+                  const char** envp, const kal_uintptr* envp_lens, kal_uintptr envc,
+                  const kal_spawn_streams* streams, kal_process* out);
 // openkal.space's names, each with a null address where the implementation
 // does not provide the interface (src/bindings.cpp).
 const binding* space_bindings(unsigned long& count);
@@ -97,8 +107,11 @@ kal_intptr impl_debug_symbolize(kal_uintptr address, char* out, kal_uintptr cap,
 // (`wait_begin', `wait_end'; build.mcpp's `waits'). A request writes the lines to the error stream
 // and is then acted on as before: the program ends as the request would have ended it, unless the
 // image took the requests over itself (`requests_taken', its `kal_process_stop_requested').
+// The requests are taken once the image is loaded, and the runner's task returns before the
+// runner ends the program (`stop_watching', 0.7.1): the program ends with the image's tasks alone.
 struct task_line;
 void        watch_requests();
+void        stop_watching();
 task_line*  task_begin();
 void        task_end(task_line* line);
 // `index' is the call's position among the bound names (surface.inc); null where nothing watches.

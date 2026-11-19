@@ -33,6 +33,18 @@
 // Where the implementation reports no request (its word is null) or no task can
 // be started to wait for one, nothing is taken: a request ends the program as
 // before, without the lines, and a measurement's report says why (`requests').
+//
+// THE REQUESTS ARE TAKEN ONCE THE IMAGE IS LOADED, AND THE RUNNER'S TASK RETURNS
+// BEFORE THE RUNNER ENDS THE PROGRAM (0.7.1). A start that is refused returns
+// with the program's requests as they were, which a program of the system that
+// runs images through libokrun keeps. Where the image's main returns, and where
+// the image calls `kal_exit', the runner asks its task to return and joins it
+// (`stop_watching'): the program ends as the image ends it, with the image's
+// tasks alone. A debugger that resumes each task in turn otherwise found the
+// runner's gone with the program the image had ended (measured: GDB 15,
+// continuing from a stop in a one-task image to its end, stopped with
+// "Couldn't get registers: No such process" in 10 of 12 runs of 0.7.0;
+// tools/tests/debugger_end.py).
 #include <openkal.h>
 #include "runner.h"
 
@@ -60,6 +72,14 @@ int g_watched = 0;        // a task of the runner's waits for the requests
 int g_taken = 0;          // the image took them over
 kal_u32 g_image_word = 0; // and was given this word
 kal_uintptr g_entered = 0;   // the task that entered the image
+// The runner's task, until it is joined where the program ends (0.7.1): asked
+// to return (`g_ending'), it says it has (`g_returned'); the implementation's
+// word it waits upon is `g_word' once it has asked for it.
+kal_task g_watcher{};
+int g_running = 0;
+int g_ending = 0;
+kal_u32 g_returned = 0;
+const kal_u32* g_word = nullptr;
 
 unsigned home(kal_uintptr task) {
     return static_cast<unsigned>((static_cast<kal_u64>(task) * 0x9E3779B97F4A7C15ull) >> 40) % kLines;
@@ -156,16 +176,20 @@ void deliver(kal_u32 requests) {
     kal_task_wake(&g_image_word, 0x7fffffff, nullptr);
 }
 
-void watch(void*) {
+void wait_for_requests() {
     const kal_u32* word = kal_process_stop_requested();
     if (!word) {
         __atomic_store_n(&g_watched, 0, __ATOMIC_RELEASE);
         profile_note("requests", "not taken: the implementation reports no request to end", 0);
         return;
     }
+    __atomic_store_n(&g_word, word, __ATOMIC_RELEASE);
     profile_note("requests", "taken: a request writes the call each task waits in", 0);
     kal_u32 seen = 0;
     for (;;) {
+        // The program ends as the image ended it: a request that comes now is
+        // not acted on.
+        if (__atomic_load_n(&g_ending, __ATOMIC_ACQUIRE)) return;
         const kal_u32 now = __atomic_load_n(word, __ATOMIC_ACQUIRE);
         if (now == seen) {
             // A wait that fails is tried again a little later, rather than at once and for ever.
@@ -186,16 +210,38 @@ void watch(void*) {
     }
 }
 
+void watch(void*) {
+    wait_for_requests();
+    __atomic_store_n(&g_returned, 1u, __ATOMIC_RELEASE);
+    kal_task_wake(&g_returned, 1, nullptr);
+}
+
 }  // namespace
 
 void watch_requests() {
     g_entered = kal_task_current();
     take(g_entered);
     __atomic_store_n(&g_watched, 1, __ATOMIC_RELEASE);
-    kal_task watcher{};
-    if (kal_task_start(&watch, nullptr, &watcher) == kal_ok) return;
+    if (kal_task_start(&watch, nullptr, &g_watcher) == kal_ok) {
+        __atomic_store_n(&g_running, 1, __ATOMIC_RELEASE);
+        return;
+    }
     __atomic_store_n(&g_watched, 0, __ATOMIC_RELEASE);
     profile_note("requests", "not taken: no task could be started to wait for them", 0);
+}
+
+void stop_watching() {
+    if (!__atomic_exchange_n(&g_running, 0, __ATOMIC_ACQ_REL)) return;
+    __atomic_store_n(&g_ending, 1, __ATOMIC_RELEASE);
+    // A wake that comes between the task's look at `g_ending' and its wait is
+    // not seen; the next, a millisecond on, is. The word is the
+    // implementation's, and a context that waits upon a word looks at it again
+    // when woken, so a wake that is no request changes nothing for another.
+    while (!__atomic_load_n(&g_returned, __ATOMIC_ACQUIRE)) {
+        if (const kal_u32* word = __atomic_load_n(&g_word, __ATOMIC_ACQUIRE)) kal_task_wake(word, 0x7fffffff, nullptr);
+        kal_task_wait(&g_returned, 0u, 1000000ull);
+    }
+    kal_task_join(g_watcher);
 }
 
 task_line* task_begin() {
@@ -242,6 +288,7 @@ const kal_u32* requests_taken() {
 // image that asks for the requests is given the implementation's word.
 struct task_line {};
 void watch_requests() {}
+void stop_watching() {}
 task_line* task_begin() { return nullptr; }
 void task_end(task_line*) {}
 task_line* wait_begin(unsigned long) { return nullptr; }
