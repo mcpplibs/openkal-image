@@ -5,6 +5,9 @@
 //                                              program that carries its images holds one
 // okrun-host images <needed.oke> <liboktwice.okso>
 //                                              a group of images run from memory
+// okrun-host file <image> [arguments...]       an image run from its file by a program that
+//                                              names no loader (0.7.1: the image's start of an
+//                                              image file is refused, examples/starts)
 #include <okrun.h>
 #include <cstdio>
 #include <cstring>
@@ -35,7 +38,7 @@ std::vector<unsigned char> read(const char* path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3) { std::fprintf(stderr, "usage: okrun-host library <okso> | okb <file.okb> | archive <file.zip> <entry> | images <oke> <okso>\n"); return 2; }
+    if (argc < 3) { std::fprintf(stderr, "usage: okrun-host library <okso> | okb <file.okb> | archive <file.zip> <entry> | images <oke> <okso> | file <image>\n"); return 2; }
     okrun_options options{};
     char why[512];
     if (std::strcmp(argv[1], "library") == 0) {
@@ -73,6 +76,11 @@ int main(int argc, char** argv) {
             { "liboktwice.okso", lib.data(), lib.size() },
         };
         okrun_run_images(images, 2, "needed.oke", 1, const_cast<const char* const*>(argv + 2), &options, why, sizeof why);
+        std::fprintf(stderr, "okrun-host: %s\n", why);
+        return 127;
+    }
+    if (std::strcmp(argv[1], "file") == 0) {
+        okrun_run_file(argv[2], argc - 2, const_cast<const char* const*>(argv + 2), &options, why, sizeof why);
         std::fprintf(stderr, "okrun-host: %s\n", why);
         return 127;
     }

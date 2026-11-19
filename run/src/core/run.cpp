@@ -252,6 +252,17 @@ bool is_archive(const void* bytes, unsigned long long size) {
 
 image_state& state() { return g_state; }
 
+#if OKRUN_HAS_PROCESS
+// This runner reads no file, so it cannot tell an image file from a program of
+// the system: every name is started as given (runner.h).
+int start_program(const kal_spawn* how, const char* path, kal_uintptr path_len,
+                  const char** argv, const kal_uintptr* argv_lens, kal_uintptr argc,
+                  const char** envp, const kal_uintptr* envp_lens, kal_uintptr envc,
+                  const kal_spawn_streams* streams, kal_process* out) {
+    return kal_process_spawn(how, path, path_len, argv, argv_lens, argc, envp, envp_lens, envc, streams, out);
+}
+#endif
+
 }  // namespace okrun
 
 using namespace okrun;

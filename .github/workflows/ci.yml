@@ -102,6 +102,10 @@ jobs:
             bash examples/build-image.sh "$arch" "out/$arch/ending.oke" examples/ending/app.c
             # An image that ends the program itself, through kal_exit (0.7.1).
             bash examples/build-image.sh "$arch" "out/$arch/exits.oke" examples/exits/app.c
+            # An image that starts images, itself and exits.oke, each entered by
+            # the runner's loader, and a program of the system as given (0.7.1).
+            CPATH="${spec%/openkal/process.h}" bash examples/build-image.sh "$arch" "out/$arch/starts.oke" examples/starts/app.c
+            cp "out/$arch/starts.oke" "out/$arch/signed-starts.oke"
             cp "out/$arch/hello.oke" "out/$arch/signed.oke"
             # The library examples/bind binds for a program of each system.
             bash examples/build-image.sh "$arch" "out/$arch/libmathlib.okso" examples/bind/mathlib/image/mathlib.c
@@ -151,6 +155,7 @@ jobs:
           "$OKLD" keygen "$RUNNER_TEMP/seed" > out/key.hex
           for arch in x86_64 aarch64; do
             "$OKLD" sign "out/$arch/signed.oke" "$RUNNER_TEMP/seed"
+            "$OKLD" sign "out/$arch/signed-starts.oke" "$RUNNER_TEMP/seed"
             "$OKLD" inspect "out/$arch/signed.oke"
             # The signature is over the stored segments too: placed, then signed.
             if "$OKLD" place "out/$arch/signed.oke" 2> signed-place.txt; then echo "::error::a signed image was placed"; exit 1; fi
@@ -315,6 +320,25 @@ jobs:
           command -v gdb > /dev/null || { sudo apt-get -o Acquire::Retries=5 update -q \
             && sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends gdb; }
           python3 tools/tests/debugger_end.py --okrun "$OKRUN" --images "out/${{ matrix.arch }}"
+      - name: An image starts images, each entered by the runner (0.7.1)
+        run: |
+          # An image file an image starts is entered through the loader the
+          # runner names, with the runner's signature requirements, and observes
+          # the vector its starter gave; a program of the system is started as
+          # given (openkal-image#42). Under 0.7.0 the image's start of itself
+          # ended by SIGSEGV on Linux.
+          a='${{ matrix.arch }}'
+          if [ "$RUNNER_OS" = Windows ]; then native=(C:/Windows/System32/cmd.exe /c "exit 5"); else native=(/bin/sh -c "exit 5"); fi
+          out=$(MSYS_NO_PATHCONV=1 "$OKRUN" "out/$a/starts.oke" "${native[@]}" | tr -d '\r')
+          echo "$out"
+          grep -qx "starts: ok" <<<"$out" || { echo "::error::an image's start of an image, or of a program of the system"; exit 1; }
+          # Signed, under a signature requirement: itself starts, and the
+          # unsigned exits.oke is refused by its reason, kal_err_permission (6).
+          out=$({ "$OKRUN" --require-signature --trust "$(cat out/key.hex)" "out/$a/signed-starts.oke" || true; } | tr -d '\r')
+          echo "$out"
+          grep -qx "starts: itself 7" <<<"$out" && grep -qx "starts: exits.oke -1006" <<<"$out" \
+            || { echo "::error::the runner's signature requirements reach the image it starts"; exit 1; }
+          echo "  ok  an image starts images through the runner, and a program of the system as given"
       - name: The same bytes
         run: |
           a='${{ matrix.arch }}'
@@ -539,6 +563,10 @@ jobs:
           grep -q "library: twice(21) = 42, next_value() = 41, 42" lib.txt || { echo "::error::okrun_open_library"; exit 1; }
           "$host" okb out/needed.okb | tr -d '\r' | grep -q "twice(21) = 42" || { echo "::error::okrun_run_okb_bytes"; exit 1; }
           "$host" images "out/$a/needed.oke" "out/$a/liboktwice.okso" | tr -d '\r' | grep -q "twice(21) = 42" || { echo "::error::okrun_run_images"; exit 1; }
+          # A program that names no loader: the image's start of an image file is
+          # refused as kal_err_not_program, and nothing is started (0.7.1).
+          "$host" file "out/$a/starts.oke" refused | tr -d '\r' | grep -q "refused as not a program" \
+            || { echo "::error::an image's start of an image file where no loader is named"; exit 1; }
           # The archive a program that carries its images holds: no okb.json,
           # the images at the root, zipalign's field and bytes between members.
           python3 examples/package/stage.py staged out

@@ -8,7 +8,7 @@ architecture that has a runner.
 |---|---|---|
 | `openkal-ld` | `libokld` | The format's definition. A reader of bytes, a checker, a signer (Ed25519) and a loader. Freestanding: no C library, no exceptions. Its users are libokrun, `okld`, and a C library's `dlopen`. |
 | `openkal-run` | `libokrun` | The runner's core. It binds an image's names to this process's one openkal implementation, in the image's calling convention, then enters the image. |
-| `openkal-tools` | `okrun`, `okld`, `okprof` | `okrun [--require-signature] [--trust <key>] [--debugger] [--prof=<what>[:dir]] image\|okb args...` runs an image or an okb. `okld check \| note \| place \| touch \| debug-split \| sign \| keygen \| inspect \| note-source \| bundle \| bundle check` works on images and okbs on a build machine. `okprof record \| report \| diff` measures what an image did across openkal. The debugger scripts are in `tools/scripts`. |
+| `openkal-tools` | `okrun`, `okld`, `okprof` | `okrun [--require-signature] [--trust <key>] [--debugger] [--prof=<what>[:dir]] [--argv0=<name>] image\|okb args...` runs an image or an okb. `okld check \| note \| place \| touch \| debug-split \| sign \| keygen \| inspect \| note-source \| bundle \| bundle check` works on images and okbs on a build machine. `okprof record \| report \| diff` measures what an image did across openkal. The debugger scripts are in `tools/scripts`. |
 | `openkal-bind` | `mcpp.mcpplibs.openkal_bind` | A build plugin. A library published as an image (`.okso`) and a C header is called from a program of Linux, macOS or Windows through a binding generated from the header ([docs/bind.md](docs/bind.md)). |
 
 `libokld` is the loader at run time and `okld` is the tool on the build machine. They share a
@@ -140,7 +140,10 @@ system, openkal-linux `^0.27.0`, openkal-macos `^0.24.0`, openkal-windows
 from the specification's SURFACE.txt, as before. A release's programs are built
 over openkal-platform 0.31.0, whose version group holds this family.
 
-Version 0.7.1 takes the requests to end once the image is loaded, and the
+Version 0.7.1 enters an image file an image starts through the loader the
+runner names, rather than handing it to the system, and states the image's name
+absolute ([An image that starts a program](#an-image-that-starts-a-program)).
+It takes the requests to end once the image is loaded, and the
 runner's task that waits for them returns before the runner ends the program:
 where the image's main returns and where the image calls `kal_exit`. The
 program ends as the image ends it, with the image's tasks alone. Under GDB 15,
@@ -359,6 +362,36 @@ its task to return and joins it before it ends the program (0.7.1), so the progr
 image's tasks alone and with the image's status; a request that comes after that is not acted on.
 A debugger that resumes each task in turn sees the program end as the image ended it.
 
+## An image that starts a program
+
+An image starts a program as any program of openkal does: `kal_process_spawn`, and the C library's
+`posix_spawn`, `execve` and `system` above it. The system runs the bytes of a file it starts as a
+program of its own, and an image is not one: under 0.7.0 an image file that an image started ended
+by SIGSEGV on Linux, and on the other systems was no program at all (#42). From 0.7.1 the runner
+answers the start (`run/build.mcpp`). A file that is an image (it carries the OPENKAL requirements
+note, SPEC 12.4) or an okb (an archive with `okb.json`) is started through the loader the runner
+names (`okrun_options::loader`; `okrun` names itself) as
+
+```text
+okrun [--require-signature] [--trust <key>]... --argv0=<argv[0]> -- <image> <argv[1]>...
+```
+
+The started image observes the vector its starter gave (openkal clause 7.6), and is held to the
+runner's signature requirements. The runner asks of the file what the loader will ask before it
+starts anything, so that a start that cannot happen is refused by its reason rather than seen as the
+loader's status: `kal_err_not_program` for an image of another architecture, of a later format, or
+requiring interfaces this system's openkal does not provide, and `kal_err_permission` for one a
+signature requirement refuses. The handle is the loader's, and its status is the image's. Any
+other file is started as given, once its first bytes and, for an ELF file, its notes are read. A
+program that names no loader, one that carries its image among them, refuses the start of an
+image file as `kal_err_not_program`; such a program starts itself by its own name, which is a
+program of the system.
+
+The image's name (`kal_env_image`) is absolute from 0.7.1, as a program's of the system is: the name
+the implementation resolves the image's file to. An image that starts itself by that name starts the
+same program again, wherever it then works. `/proc/self/exe` and the system's other names for the
+running program name the runner, as they name any loader.
+
 ## A debugger
 
 An image's instructions and read-only data are its file's pages, so a debugger finds the image
@@ -420,6 +453,10 @@ its header and calls it, on openkal and on every other system alike ([docs/bind.
 - Asked to end, okrun names the openkal call each task of an image waits in, with the task's
   identity, and the program ends as the request would have ended it; an image that took the
   requests over is named the same and ends by itself, with its own status.
+- An image starts itself and another image through the runner, each observing the vector its
+  starter gave, and a program of the system as given, on all four machines; under a signature
+  requirement the unsigned image it starts is refused as `kal_err_permission`, and a program that
+  names no loader refuses the start of an image file as `kal_err_not_program`.
 - libokld's SHA-256, CRC-32, ZIP reader and writer (with ZIP64) and manifest reader hold
   against their vectors and refusals.
 

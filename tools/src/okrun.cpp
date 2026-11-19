@@ -8,14 +8,21 @@
 //   --prof=<what>[:dir]   measure the image: calls, counters, perfmap (comma
 //                         separated); the report goes to <dir>/okprof-<id>.json,
 //                         which `okprof report' reads (OKRUN_PROF says the same)
+//   --argv0=<name>        the name the image is told it was started as, its
+//                         first argument, in place of the image's name (0.7.1)
 //
 // `okrun cache [list]' lists what the runner keeps for this machine (0.4: an
 // image's data for this boot's base, snapshots, their markers); `okrun cache gc'
 // removes what was prepared for another boot, and `--all' everything.
 //
-// The image is told its arguments are the image's (or the okb's) name and what
-// follows it. The images it needs are found beside it, in `lib/<arch>/' and
-// `lib/' there, and in OKRUN_PATH.
+// The image is told its arguments are the image's (or the okb's) name, or the
+// name `--argv0' gives, and what follows it. The images it needs are found
+// beside it, in `lib/<arch>/' and `lib/' there, and in OKRUN_PATH.
+//
+// AN IMAGE THAT STARTS AN IMAGE FILE (0.7.1) starts it through this program,
+// which the runner is told is its loader: the started image is entered by a
+// runner as this one was, with this one's signature requirements, and observes
+// the arguments its starter gave (openkal clause 7.6), the first by `--argv0'.
 #include <okrun.h>
 #include <openkal.h>
 
@@ -61,9 +68,19 @@ int main(int argc, char** argv) {
     if (argc >= 2 && same(argv[1], "cache")) return cache(argc, argv);
     okrun_options options{};
     static unsigned char keys[16 * 32];
+    // This program is the loader an image's start of an image file goes
+    // through (0.7.1): its own name, as the implementation states it.
+    static char self[4096];
+    if (const kal_intptr n = kal_env_image(self, sizeof self - 1); n > 0 && n < static_cast<kal_intptr>(sizeof self)) {
+        self[n] = 0;
+        options.loader = self;
+    }
+    const char* argv0 = nullptr;
     int i = 1;
     for (; i < argc && argv[i][0] == '-' && argv[i][1] == '-'; ++i) {
         if (same(argv[i], "--")) { ++i; break; }
+        if (argv[i][2] == 'a' && argv[i][3] == 'r' && argv[i][4] == 'g' && argv[i][5] == 'v'
+            && argv[i][6] == '0' && argv[i][7] == '=') { argv0 = argv[i] + 8; continue; }
         if (same(argv[i], "--require-signature")) { options.require_signature = 1; continue; }
         if (same(argv[i], "--debugger")) { options.debugger = 1; continue; }
         if (argv[i][2] == 'p' && argv[i][3] == 'r' && argv[i][4] == 'o' && argv[i][5] == 'f'
@@ -83,11 +100,13 @@ int main(int argc, char** argv) {
     }
     options.trusted = keys;
     if (i >= argc) {
-        say("usage: okrun [--require-signature] [--trust <hex>]... [--debugger] [--prof=<what>[:dir]] image|okb [arguments...]\n");
+        say("usage: okrun [--require-signature] [--trust <hex>]... [--debugger] [--prof=<what>[:dir]] [--argv0=<name>] image|okb [arguments...]\n");
         return 2;
     }
     char why[512];
-    okrun_run_file(argv[i], argc - i, const_cast<const char* const*>(argv + i), &options, why, sizeof why);
+    const char* path = argv[i];
+    if (argv0) argv[i] = const_cast<char*>(argv0);
+    okrun_run_file(path, argc - i, const_cast<const char* const*>(argv + i), &options, why, sizeof why);
     say("okrun: "); say(why); say("\n");
     return 127;
 }

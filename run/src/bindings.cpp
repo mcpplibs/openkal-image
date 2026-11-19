@@ -152,6 +152,15 @@ OKRUN_IMAGE_ABI void own_kal_abort(const char* msg, kal_uintptr len) {
 // request still writes the call each task waits in, before the image's word
 // counts it.
 OKRUN_IMAGE_ABI const kal_u32* own_kal_process_stop_requested(void) { return requests_taken(); }
+// A START OF A PROGRAM (0.7.1): an image file is entered by a loader rather
+// than handed to the system, which runs a file's bytes as its own program's
+// (src/full/run.cpp, `start_program').
+OKRUN_IMAGE_ABI int own_kal_process_spawn(const struct kal_spawn* how, const char* path, kal_uintptr path_len,
+                                          const char** argv, const kal_uintptr* argv_lens, kal_uintptr argc,
+                                          const char** envp, const kal_uintptr* envp_lens, kal_uintptr envc,
+                                          const struct kal_spawn_streams* streams, struct kal_process* out) {
+    return start_program(how, path, path_len, argv, argv_lens, argc, envp, envp_lens, envc, streams, out);
+}
 #endif
 OKRUN_IMAGE_ABI int own_kal_prof_active(void) { return profile_active() ? 1 : 0; }
 OKRUN_IMAGE_ABI int own_kal_prof_counter(const char* name, kal_uintptr len, const volatile kal_u64* cell) {

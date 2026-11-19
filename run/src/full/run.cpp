@@ -194,6 +194,31 @@ bool map_all(kal_file f, file_bytes& out) {
     return true;
 }
 
+// An open file's bytes, mapped or read; the file is the result's, or closed.
+// False with `no_memory' set where a buffer could not be had, and with it
+// clear where the file could not be read.
+bool read_open(kal_file f, file_bytes& out, bool& no_memory) {
+    no_memory = false;
+    if (map_all(f, out)) return true;
+    const kal_stream s = kal_fs_stream(f);
+    for (;;) {
+        if (out.size == out.cap) {
+            const unsigned long long grown = out.cap ? out.cap * 2 : (1ull << 20);
+            auto* d = static_cast<unsigned char*>(kal_alloc(grown, 16));
+            if (!d) { kal_fs_close_file(f); release_file(out); no_memory = true; return false; }
+            for (unsigned long long i = 0; i < out.size; ++i) d[i] = out.data[i];
+            if (out.data) kal_free(out.data, out.cap, 16);
+            out.data = d; out.cap = grown;
+        }
+        const kal_intptr got = kal_stream_read(s, out.data + out.size, out.cap - out.size);
+        if (got < 0) { kal_fs_close_file(f); release_file(out); return false; }
+        if (got == 0) break;
+        out.size += static_cast<unsigned long long>(got);
+    }
+    kal_fs_close_file(f);
+    return true;
+}
+
 bool read_all(const char* path, file_bytes& out, char* why, unsigned long long cap) {
     kal_dir dir{};
     const char* rest = nullptr;
@@ -201,24 +226,11 @@ bool read_all(const char* path, file_bytes& out, char* why, unsigned long long c
     unsigned long n = length(rest);
     kal_file f{};
     if (kal_fs_open(dir, rest, n, KAL_OPEN_READ, &f) != kal_ok) { text(why, cap) << path << " cannot be opened"; return false; }
-    if (map_all(f, out)) return true;
-    const kal_stream s = kal_fs_stream(f);
-    for (;;) {
-        if (out.size == out.cap) {
-            const unsigned long long grown = out.cap ? out.cap * 2 : (1ull << 20);
-            auto* d = static_cast<unsigned char*>(kal_alloc(grown, 16));
-            if (!d) { kal_fs_close_file(f); release_file(out); text(why, cap) << "no memory for " << path; return false; }
-            for (unsigned long long i = 0; i < out.size; ++i) d[i] = out.data[i];
-            if (out.data) kal_free(out.data, out.cap, 16);
-            out.data = d; out.cap = grown;
-        }
-        const kal_intptr got = kal_stream_read(s, out.data + out.size, out.cap - out.size);
-        if (got < 0) { kal_fs_close_file(f); release_file(out); text(why, cap) << path << " cannot be read"; return false; }
-        if (got == 0) break;
-        out.size += static_cast<unsigned long long>(got);
-    }
-    kal_fs_close_file(f);
-    return true;
+    bool no_memory = false;
+    if (read_open(f, out, no_memory)) return true;
+    if (no_memory) text(why, cap) << "no memory for " << path;
+    else text(why, cap) << path << " cannot be read";
+    return false;
 }
 
 bool is_archive(const void* bytes, unsigned long long size) {
@@ -1783,6 +1795,199 @@ void seal_refused(const char* what) {
 
 bool locate_path(const char* path, kal_dir& dir, const char*& rest) { return locate(path, dir, rest); }
 
+// --- an image that starts an image file (0.7.1) ------------------------------------
+
+namespace {
+
+kal_u32 le16(const unsigned char* p) { return static_cast<kal_u32>(p[0]) | static_cast<kal_u32>(p[1]) << 8; }
+kal_u32 le32(const unsigned char* p) { return le16(p) | le16(p + 2) << 16; }
+u64 le64(const unsigned char* p) { return static_cast<u64>(le32(p)) | static_cast<u64>(le32(p + 4)) << 32; }
+
+// An OPENKAL note of type 1, the requirements every image carries (SPEC 12.4),
+// among `n' bytes of notes.
+bool has_requirements_note(const unsigned char* p, u64 n) {
+    u64 at = 0;
+    while (at + 12 <= n) {
+        const kal_u32 namesz = le32(p + at), descsz = le32(p + at + 4), type = le32(p + at + 8);
+        const u64 name_at = at + 12;
+        if (type == 1 && namesz == 8 && name_at + 8 <= n && same_bytes(p + name_at, "OPENKAL", 8)) return true;
+        at = name_at + ((static_cast<u64>(namesz) + 3) & ~u64{3}) + ((static_cast<u64>(descsz) + 3) & ~u64{3});
+    }
+    return false;
+}
+
+// WHETHER AN ELF FILE IS AN IMAGE, by its program headers and notes alone: a
+// start of any program reads a few hundred bytes of it, never the whole file.
+// A program of the system is an ELF file as well, and has no such note.
+bool is_image_file(kal_file f) {
+    unsigned char head[64] = {};
+    const kal_intptr got = kal_fs_read_at(f, head, sizeof head, 0);
+    if (got < 52 || head[0] != 0x7f || head[1] != 'E' || head[2] != 'L' || head[3] != 'F' || head[5] != 1) return false;
+    const bool wide = head[4] == 2;
+    if ((!wide && head[4] != 1) || (wide && got < 64)) return false;
+    const u64 phoff = wide ? le64(head + 32) : le32(head + 28);
+    const kal_u32 entsize = wide ? le16(head + 54) : le16(head + 42);
+    const kal_u32 count = wide ? le16(head + 56) : le16(head + 44);
+    unsigned char headers[64 * 56];
+    if (entsize < (wide ? 56u : 32u) || entsize > 56u || count == 0 || count > 64) return false;
+    const kal_uintptr want = static_cast<kal_uintptr>(entsize) * count;
+    if (kal_fs_read_at(f, headers, want, phoff) != static_cast<kal_intptr>(want)) return false;
+    for (kal_u32 i = 0; i < count; ++i) {
+        const unsigned char* e = headers + static_cast<kal_uintptr>(i) * entsize;
+        if (le32(e) != 4) continue;   // PT_NOTE
+        const u64 offset = wide ? le64(e + 8) : le32(e + 4);
+        const u64 size = wide ? le64(e + 32) : le32(e + 16);
+        if (size < 12 || size > 65536) continue;
+        auto* notes = static_cast<unsigned char*>(kal_alloc(static_cast<kal_uintptr>(size), 8));
+        if (!notes) return false;
+        const bool found = kal_fs_read_at(f, notes, static_cast<kal_uintptr>(size), offset) == static_cast<kal_intptr>(size)
+                           && has_requirements_note(notes, size);
+        kal_free(notes, static_cast<kal_uintptr>(size), 8);
+        if (found) return true;
+    }
+    return false;
+}
+
+// WHAT THE LOADER WILL ASK OF THE FILE, ASKED HERE FIRST, so that a start that
+// cannot happen is refused by its reason rather than seen as the loader's exit
+// status (process.h): kal_ok, kal_err_not_program for a file this machine's
+// runner cannot enter, kal_err_permission for one a signature requirement
+// refuses; 1 for an archive that is not an okb, which is no image of this
+// runner's (a ZIP archive without okb.json names no entry to enter).
+int admit_start(const unsigned char* bytes, u64 size, bool archive, const okrun_options* options) {
+    char why[256];
+    if (!archive) {
+        okrun_options format{};
+        if (!admit(bytes, size, "", &format, why, sizeof why)) return kal_err_not_program;
+        if (!signature_required(options)) return kal_ok;
+        unsigned char key[32] = {};
+        return okld_verify(bytes, size, key) > 0 && key_is_trusted(options, key) ? kal_ok : kal_err_permission;
+    }
+    okld_why reason{};
+    okld_zip_member json{};
+    const int found = okld_zip_find(bytes, size, "okb.json", &json, &reason);
+    if (found == 1) return 1;
+    okld_okb_manifest manifest{};
+    if (found != 0 || okld_okb_admit(bytes, size, &json, nullptr, 0, &reason) != 0
+        || okld_okb_read_manifest(bytes + json.data, json.size, &manifest, &reason) != 0)
+        return kal_err_not_program;
+    bool mine = false;
+    for (okld_u32 i = 0; i < manifest.arch_count; ++i) mine = mine || same(manifest.archs[i].name, okrun_arch);
+    if (!mine) return kal_err_not_program;
+    if (!signature_required(options)) return kal_ok;
+    okld_zip_member sig{};
+    if (okld_zip_find(bytes, size, "okb.sig", &sig, &reason) != 0 || sig.size != 96
+        || okld_okb_admit(bytes, size, &sig, nullptr, 0, &reason) != 0)
+        return kal_err_permission;
+    const unsigned char* k = bytes + sig.data;
+    return okld_verify_message(k, bytes + json.data, json.size, k + 32) == 1 && key_is_trusted(options, k)
+               ? kal_ok : kal_err_permission;
+}
+
+char hex_digit(unsigned v) { return static_cast<char>(v < 10 ? '0' + v : 'a' + v - 10); }
+
+// The loader's command: `<loader> [--require-signature] [--trust <hex>]...
+// --argv0=<argv[0]> -- <image> <argv[1]>...', in memory one allocation holds.
+struct loader_command {
+    const char** words = nullptr;
+    kal_uintptr* lens = nullptr;
+    kal_uintptr count = 0;
+    char* text = nullptr;
+    kal_uintptr text_size = 0;
+    ~loader_command() {
+        if (words) kal_free(words, sizeof(const char*) * count, alignof(const char*));
+        if (lens) kal_free(lens, sizeof(kal_uintptr) * count, alignof(kal_uintptr));
+        if (text) kal_free(text, text_size, 1);
+    }
+};
+
+bool compose(loader_command& c, const okrun_options* o, const char* image, kal_uintptr image_len,
+             const char** argv, const kal_uintptr* argv_lens, kal_uintptr argc) {
+    const kal_uintptr keys = o->trusted ? o->trusted_count : 0;
+    const kal_uintptr arg0 = argc > 0 ? argv_lens[0] : 0;
+    c.count = 1 + (o->require_signature ? 1 : 0) + 2 * keys + 3 + (argc > 1 ? argc - 1 : 0);
+    c.text_size = 8 + arg0 + 64 * keys + image_len;
+    c.words = static_cast<const char**>(kal_alloc(sizeof(const char*) * c.count, alignof(const char*)));
+    c.lens = static_cast<kal_uintptr*>(kal_alloc(sizeof(kal_uintptr) * c.count, alignof(kal_uintptr)));
+    c.text = static_cast<char*>(kal_alloc(c.text_size, 1));
+    if (!c.words || !c.lens || !c.text) return false;
+    kal_uintptr w = 0, at = 0;
+    auto word = [&](const char* p, kal_uintptr n) { c.words[w] = p; c.lens[w] = n; ++w; };
+    auto own = [&](const char* p, kal_uintptr n) {
+        char* start = c.text + at;
+        for (kal_uintptr i = 0; i < n; ++i) c.text[at++] = p[i];
+        return start;
+    };
+    word(o->loader, length(o->loader));
+    if (o->require_signature) word("--require-signature", 19);
+    for (kal_uintptr k = 0; k < keys; ++k) {
+        word("--trust", 7);
+        char* start = c.text + at;
+        for (kal_uintptr b = 0; b < 32; ++b) {
+            c.text[at++] = hex_digit(o->trusted[k * 32 + b] >> 4);
+            c.text[at++] = hex_digit(o->trusted[k * 32 + b] & 15);
+        }
+        word(start, 64);
+    }
+    char* argv0 = own("--argv0=", 8);
+    own(argc > 0 ? argv[0] : "", arg0);
+    word(argv0, 8 + arg0);
+    word("--", 2);
+    word(own(image, image_len), image_len);
+    for (kal_uintptr i = 1; i < argc; ++i) word(argv[i], argv_lens[i]);
+    return w == c.count;
+}
+
+}  // namespace
+
+// AN IMAGE FILE IS ENTERED BY A LOADER, NOT HANDED TO THE SYSTEM (0.7.1). The
+// system runs the bytes of a file it starts as its own program's, and an image
+// is not one: an ELF image under Linux ended by SIGSEGV (139), and named
+// elsewhere it is no program at all (openkal-image#42). Where okrun_options
+// names a loader, an image file or an okb is started through it, as `okrun'
+// would start it from a command line, with this runner's signature
+// requirements; the started image observes the vector its starter gave
+// (openkal clause 7.6). The handle is the loader's, whose status is the
+// image's. Any other file is started as given.
+int start_program(const kal_spawn* how, const char* path, kal_uintptr path_len,
+                  const char** argv, const kal_uintptr* argv_lens, kal_uintptr argc,
+                  const char** envp, const kal_uintptr* envp_lens, kal_uintptr envc,
+                  const kal_spawn_streams* streams, kal_process* out) {
+    const auto as_given = [&] {
+        return kal_process_spawn(how, path, path_len, argv, argv_lens, argc, envp, envp_lens, envc, streams, out);
+    };
+    if (!how || !path || path_len == 0) return as_given();
+    kal_file f{};
+    if (kal_fs_open(how->base, path, path_len, KAL_OPEN_READ, &f) != kal_ok) return as_given();
+    unsigned char magic[4] = {};
+    const bool archive = kal_fs_read_at(f, magic, 4, 0) == 4 && magic[0] == 'P' && magic[1] == 'K'
+                         && magic[2] == 3 && magic[3] == 4;
+    if (!archive && !is_image_file(f)) { kal_fs_close_file(f); return as_given(); }
+    file_bytes bytes;
+    bool no_memory = false;
+    if (!read_open(f, bytes, no_memory)) return no_memory ? kal_err_no_memory : kal_err_io;
+    const okrun_options* o = g_search.options;
+    const int admitted = admit_start(bytes.data, bytes.size, archive, o);
+    release_file(bytes);
+    if (admitted == 1) return as_given();
+    if (!o || o->carried || !o->loader) return kal_err_not_program;
+    if (admitted != kal_ok) return admitted;
+    // The image as the loader is told it: the name the implementation resolves
+    // the start's to, absolute in this environment's spelling.
+    char image[4096];
+    const kal_intptr image_len = kal_fs_resolved_name(how->base, path, path_len, image, sizeof image);
+    if (image_len <= 0 || image_len >= static_cast<kal_intptr>(sizeof image)) return kal_err_not_program;
+    kal_dir loader_dir{};
+    const char* loader_rest = nullptr;
+    if (!locate(o->loader, loader_dir, loader_rest)) return kal_err_not_program;
+    loader_command command;
+    if (!compose(command, o, image, static_cast<kal_uintptr>(image_len), argv, argv_lens, argc)) return kal_err_no_memory;
+    kal_spawn through = *how;
+    through.base = loader_dir;
+    return kal_process_spawn(&through, loader_rest, length(loader_rest), command.words, command.lens, command.count,
+                             envp, envp_lens, envc, streams, out);
+}
+
 }  // namespace okrun
 
 using namespace okrun;
@@ -1811,7 +2016,19 @@ extern "C" int okrun_run_file(const char* path, int argc, const char* const* arg
     if (!read_all(path, f, why, cap)) return -1;
     g_search.ran = f;
     copy_text(g_search.ran_path, sizeof g_search.ran_path, path);
-    const int status = okrun_run_bytes(f.data, f.size, path, argc, argv, options, why, cap);
+    // THE IMAGE'S NAME IS ABSOLUTE (0.7.1), as a program's of the system is
+    // (kal_env_image): a name relative to where the runner was started stops
+    // naming the image once the program works elsewhere, and an image starts
+    // itself by its name.
+    static char named[4096];
+    const char* name = path;
+    kal_dir dir{};
+    const char* rest = nullptr;
+    if (locate(path, dir, rest)) {
+        const kal_intptr n = kal_fs_resolved_name(dir, rest, length(rest), named, sizeof named - 1);
+        if (n > 0 && n < static_cast<kal_intptr>(sizeof named - 1)) { named[n] = 0; name = named; }
+    }
+    const int status = okrun_run_bytes(f.data, f.size, name, argc, argv, options, why, cap);
     release_ran(g_search);
     return status;
 }
