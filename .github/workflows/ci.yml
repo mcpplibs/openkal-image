@@ -316,9 +316,10 @@ jobs:
           # GDB stopped before the end while the runner's task waits and then
           # continued: the runner's task returns before the program ends, so
           # each run ends normally, the image's main returning or calling kal_exit.
-          # The archive's transient refusals (503) are retried, rather than failing the step.
-          command -v gdb > /dev/null || { sudo apt-get -o Acquire::Retries=5 update -q \
-            && sudo apt-get -o Acquire::Retries=5 install -y --no-install-recommends gdb; }
+          # The debugger is the index's static build (xim:gdb), the same on every
+          # Linux runner, not the distribution's the runner may or may not carry.
+          xlings install xim:gdb@18.1 -y -g
+          gdb --version | head -1
           python3 tools/tests/debugger_end.py --okrun "$OKRUN" --images "out/${{ matrix.arch }}"
       - name: An image starts images, each entered by the runner (0.7.1)
         run: |
