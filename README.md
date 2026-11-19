@@ -140,6 +140,21 @@ system, openkal-linux `^0.27.0`, openkal-macos `^0.24.0`, openkal-windows
 from the specification's SURFACE.txt, as before. A release's programs are built
 over openkal-platform 0.31.0, whose version group holds this family.
 
+Version 0.7.1 takes the requests to end once the image is loaded, and the
+runner's task that waits for them returns before the runner ends the program:
+where the image's main returns and where the image calls `kal_exit`. The
+program ends as the image ends it, with the image's tasks alone. Under GDB 15,
+continued from a stop in a one-task image to its end, 0.7.0 stopped with
+"Couldn't get registers: No such process" in 10 of 12 runs instead of the
+program's end: GDB resumes each task in turn, and the program had ended before
+it resumed the runner's. A start that is refused returns with the program's
+requests as they were, which a program of the system that runs images through
+libokrun keeps. A release's programs are built over openkal-platform 0.31.1,
+whose group holds this release and openkal-macos 0.24.1: on macOS the runner's
+task acts on a request, and 0.24.1 waits for the request's delivery before the
+status a shell gives such an end (0.24.0 ended first, with 143, in one run of
+two of `tools/tests/end_request.py`).
+
 ## An image
 
 ```sh
@@ -337,6 +352,12 @@ A harness that asks a program to end and waits a moment before it ends it by for
 each task was waiting for. Where the implementation reports no request to end, or no task can be
 started to wait for one, nothing is taken and a request ends the program as before; a
 measurement's report states which (`requests`).
+
+The requests are taken once the image is loaded: a start that is refused returns with them as
+they were. Where the image's main returns, and where the image calls `kal_exit`, the runner asks
+its task to return and joins it before it ends the program (0.7.1), so the program ends with the
+image's tasks alone and with the image's status; a request that comes after that is not acted on.
+A debugger that resumes each task in turn sees the program end as the image ended it.
 
 ## A debugger
 

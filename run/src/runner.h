@@ -97,8 +97,11 @@ kal_intptr impl_debug_symbolize(kal_uintptr address, char* out, kal_uintptr cap,
 // (`wait_begin', `wait_end'; build.mcpp's `waits'). A request writes the lines to the error stream
 // and is then acted on as before: the program ends as the request would have ended it, unless the
 // image took the requests over itself (`requests_taken', its `kal_process_stop_requested').
+// The requests are taken once the image is loaded, and the runner's task returns before the
+// runner ends the program (`stop_watching', 0.7.1): the program ends with the image's tasks alone.
 struct task_line;
 void        watch_requests();
+void        stop_watching();
 task_line*  task_begin();
 void        task_end(task_line* line);
 // `index' is the call's position among the bound names (surface.inc); null where nothing watches.

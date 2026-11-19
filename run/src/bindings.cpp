@@ -131,10 +131,13 @@ OKRUN_IMAGE_ABI kal_intptr own_kal_env_loader(char* out, kal_uintptr cap) {
 // THE LOADER'S OWN INTERFACES (SPEC 12.3, 0.2): openkal.prof and openkal.debug
 // are answered here, and the word of interfaces states them beside the
 // implementation's. The program's end is where a measurement writes what it
-// measured, so `kal_exit' and `kal_abort' pass through here first.
+// measured, so `kal_exit' and `kal_abort' pass through here first. An image
+// that ends the program ends it with its own tasks alone (0.7.1,
+// src/waits.cpp); an abort ends it at once.
 OKRUN_IMAGE_ABI kal_u64 own_kal_interfaces(void) { return own_interfaces(); }
 OKRUN_IMAGE_ABI void own_kal_exit(int status) {
     profile_phase("exit");
+    stop_watching();
     profile_finish();
     kal_exit(status);
 }

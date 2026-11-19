@@ -1603,9 +1603,6 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     prepare_host(s, true);
     const snapshotting snapshot = snapshot_mode();
     if (snapshot == snapshotting::make) make_snapshot(s, bytes, size, name);
-    // The requests to end are the runner's from here, and one writes the call
-    // each task of the image waits in (0.7, src/waits.cpp).
-    watch_requests();
     profile_phase("admitted");
     profile_note("prefetch", s.host.prefetch == 2 ? "the touched pages and the data"
                              : s.host.prefetch == 1 ? "the touched pages" : "nothing", 0);
@@ -1645,6 +1642,10 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     }
     void* entry = okld_entry(m);
     if (!entry) { text(why, cap) << name << ": the image has no entry"; return -1; }
+    // The requests to end are the runner's from here, where the start can no
+    // longer be refused, and one writes the call each task of the image waits
+    // in (0.7, src/waits.cpp; 0.7.1: not before the image is loaded).
+    watch_requests();
     // Where the entry image's bytes can be read again (0.2): the file run, at
     // the image's offset in it, or nowhere for bytes a program carries, which
     // stay where they are.
@@ -1684,6 +1685,8 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     const int status = reinterpret_cast<image_main>(entry)();
     profile_phase("main");
     okld_finalise(m, &call_image, nullptr);
+    // The program ends with the image's tasks alone (0.7.1, src/waits.cpp).
+    stop_watching();
     profile_finish();
     kal_exit(status);
 }

@@ -175,8 +175,6 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     g_state.name = name;
     g_state.carried = s.options && s.options->carried;
     g_state.started = true;
-    // As the full runner (0.7, src/waits.cpp): nothing where there are no processes or contexts.
-    watch_requests();
     okld_host& h = s.host;
     h.reserve = &reserve; h.publish = &publish; h.release = &release; h.map = nullptr;
     h.granularity = &granularity; h.resolve = &resolve;
@@ -197,10 +195,15 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     }
     void* entry = okld_entry(m);
     if (!entry) { text(why, cap) << name << ": the image has no entry"; return -1; }
+    // As the full runner (0.7, src/waits.cpp; 0.7.1: from here, and its task
+    // returns before the program ends): nothing where there are no processes or
+    // contexts.
+    watch_requests();
     okrun_fp_enter();
     okld_initialise(m, &call_image, nullptr);
     const int status = reinterpret_cast<image_main>(entry)();
     okld_finalise(m, &call_image, nullptr);
+    stop_watching();
     kal_exit(status);
 }
 
