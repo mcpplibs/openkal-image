@@ -131,6 +131,15 @@ release carries its binaries (0.6.3 was published without them), and it adds
 FreeBSD x86_64 and aarch64: static programs of the platform's hosted musl
 identity, built on Linux and run in a FreeBSD machine before they are attached.
 
+Version 0.7.0 writes, when the program is asked to end, the openkal call each
+task of the image waits in, with the task's identity, and then acts on the
+request as before ([When the program is asked to end](#when-the-program-is-asked-to-end)).
+The package follows openkal 0.26: openkal `^0.26.0` and, as the defaults per
+system, openkal-linux `^0.27.0`, openkal-macos `^0.24.0`, openkal-windows
+`^0.23.0` and openkal-freebsd `^0.2.0`. The names the runner binds are generated
+from the specification's SURFACE.txt, as before. A release's programs are built
+over openkal-platform 0.31.0, whose version group holds this family.
+
 ## An image
 
 ```sh
