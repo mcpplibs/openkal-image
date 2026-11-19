@@ -200,6 +200,7 @@ template <unsigned long I> OKRUN_IMAGE_ABI void refuse() { asked(g_names[I].name
 #define OKRUN_BIND(n, i)     { #n, reinterpret_cast<void*>(&refuse<i>) },
 #define OKRUN_OWN(n, i)      OKRUN_BIND(n, i)
 #define OKRUN_CALLBACK(n, i) OKRUN_BIND(n, i)
+#define OKRUN_WAIT(n, i)     OKRUN_BIND(n, i)
 #define OKRUN_ABSENT(n, i)   OKRUN_BIND(n, i)
 const binding g_main[] = {
 #include "surface.inc"

@@ -1603,6 +1603,9 @@ int enter(search& s, const void* bytes, unsigned long long size, const char* nam
     prepare_host(s, true);
     const snapshotting snapshot = snapshot_mode();
     if (snapshot == snapshotting::make) make_snapshot(s, bytes, size, name);
+    // The requests to end are the runner's from here, and one writes the call
+    // each task of the image waits in (0.7, src/waits.cpp).
+    watch_requests();
     profile_phase("admitted");
     profile_note("prefetch", s.host.prefetch == 2 ? "the touched pages and the data"
                              : s.host.prefetch == 1 ? "the touched pages" : "nothing", 0);

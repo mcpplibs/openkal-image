@@ -18,7 +18,9 @@ name: CI
 #              program of the system calls an image's library through libokrun
 #              and through the binding openkal-bind generates, and the binding's
 #              refusals hold. An image at its base, anywhere and unplaced
-#              observes the same memory (0.4.0).
+#              observes the same memory (0.4.0). Asked to end, okrun names the
+#              openkal call each task of an image waits in, then ends the
+#              program as the request would have (0.7.0).
 
 on:
   push:
@@ -79,8 +81,8 @@ jobs:
             bash examples/build-image.sh "$arch" "out/$arch/hello.oke" examples/hello/app.c
             # The declarations are compiled from the public specification the
             # tools resolved: any patch of its minor version (openkal clause 8),
-            # which is 0.25.1 since that patch was published.
-            spec=$(find "$HOME/.mcpp" -path '*openkal*0.25.*/include/openkal/process.h' -type f | sort -V | tail -1)
+            # 0.26 since 0.7.0.
+            spec=$(find "$HOME/.mcpp" -path '*openkal*0.26.*/include/openkal/process.h' -type f | sort -V | tail -1)
             test -n "$spec"
             CPATH="${spec%/openkal/process.h}" bash examples/build-image.sh "$arch" "out/$arch/process-unit.oke" examples/process-unit/app.c
             bash examples/build-image.sh "$arch" "out/$arch/liboktwice.okso" examples/needed/lib.c
@@ -94,6 +96,8 @@ jobs:
             bash examples/build-image.sh "$arch" "out/$arch/stack.oke" examples/stack/app.c
             # The convention's floating-point state at the entry and in a context (0.5.3).
             bash examples/build-image.sh "$arch" "out/$arch/fpstate.oke" examples/fpstate/app.c
+            # Tasks that wait when the program is asked to end (0.7.0).
+            bash examples/build-image.sh "$arch" "out/$arch/ending.oke" examples/ending/app.c
             cp "out/$arch/hello.oke" "out/$arch/signed.oke"
             # The library examples/bind binds for a program of each system.
             bash examples/build-image.sh "$arch" "out/$arch/libmathlib.okso" examples/bind/mathlib/image/mathlib.c
@@ -289,6 +293,14 @@ jobs:
         run: |
           python=python3; [ "$RUNNER_OS" = Windows ] && python=python
           "$python" tools/tests/record_env.py --okprof "$OKPROF"
+      - name: A request to end names the call each task waits in (0.7.0)
+        run: |
+          # Asked to end (SIGTERM; a console's CTRL_BREAK_EVENT on Windows),
+          # okrun writes the openkal call each task of the image waits in, then
+          # ends the program as the request would have; an image that took the
+          # requests over is named the same and ends by itself.
+          python=python3; [ "$RUNNER_OS" = Windows ] && python=python
+          "$python" tools/tests/end_request.py --okrun "$OKRUN" --image "out/${{ matrix.arch }}/ending.oke"
       - name: The same bytes
         run: |
           a='${{ matrix.arch }}'

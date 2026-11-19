@@ -131,6 +131,15 @@ release carries its binaries (0.6.3 was published without them), and it adds
 FreeBSD x86_64 and aarch64: static programs of the platform's hosted musl
 identity, built on Linux and run in a FreeBSD machine before they are attached.
 
+Version 0.7.0 writes, when the program is asked to end, the openkal call each
+task of the image waits in, with the task's identity, and then acts on the
+request as before ([When the program is asked to end](#when-the-program-is-asked-to-end)).
+The package follows openkal 0.26: openkal `^0.26.0` and, as the defaults per
+system, openkal-linux `^0.27.0`, openkal-macos `^0.24.0`, openkal-windows
+`^0.23.0` and openkal-freebsd `^0.2.0`. The names the runner binds are generated
+from the specification's SURFACE.txt, as before. A release's programs are built
+over openkal-platform 0.31.0, whose version group holds this family.
+
 ## An image
 
 ```sh
@@ -299,6 +308,36 @@ identity, length and modification time. A later start of the same file admits th
 shape alone; a file replaced or changed is compared again. A language server that starts a
 worker per module no longer reads its 146 MB okb at each start.
 
+## When the program is asked to end
+
+A task of an image that never returns is waiting in a call of openkal or running its own code, and
+a program ended by force leaves nothing to say which. Where the image is entered, the runner takes
+the program's requests to end (`kal_process_stop_requested`: SIGTERM, SIGINT and SIGHUP on Linux,
+macOS and FreeBSD; a console's control events on Windows) and waits for them on a task of its own
+(0.7.0). Each task of the image has a line: its identity (`kal_task_current`) and the call that
+waits it is in. The calls that wait are those that return only when another party acts or a time
+passes (`run/build.mcpp`): the operations `openkal.timeout` bounds and its own forms of them,
+`kal_task_wait`, `kal_task_join`, `kal_time_sleep`, `kal_stream_flush`, `kal_fs_open`,
+`kal_fs_lock`, `kal_net_connect`, `kal_net_connect_at` and `kal_datagram_send_to`. A request
+writes the lines to the runner's error stream, within a second where the implementation bounds a
+write:
+
+```text
+okrun: asked to end; the openkal call each task of the image waits in:
+okrun:   task 2548376 (main): kal_task_join
+okrun:   task 2548380: kal_task_wait
+```
+
+and is then acted on as it was before the runner took it: the program ends as the request would
+have ended it (`kal_process_end_as_requested`), so its starter observes the same end. An image that
+takes the requests over itself is given a word that the runner counts once the record is written,
+and acts on each request as it always did; each request writes the record. A task in none of the
+calls that wait is `in no call that waits`: it runs its own code, or a call that returns by itself.
+A harness that asks a program to end and waits a moment before it ends it by force so learns what
+each task was waiting for. Where the implementation reports no request to end, or no task can be
+started to wait for one, nothing is taken and a request ends the program as before; a
+measurement's report states which (`requests`).
+
 ## A debugger
 
 An image's instructions and read-only data are its file's pages, so a debugger finds the image
@@ -357,6 +396,9 @@ its header and calls it, on openkal and on every other system alike ([docs/bind.
   nothing to the runner's cache; `okrun cache` lists and removes what it keeps.
 - An okb states its images' chunk digests, which okrun verifies on several contexts and
   `okld bundle check` beside the whole digest; a changed byte is refused by either.
+- Asked to end, okrun names the openkal call each task of an image waits in, with the task's
+  identity, and the program ends as the request would have ended it; an image that took the
+  requests over is named the same and ends by itself, with its own status.
 - libokld's SHA-256, CRC-32, ZIP reader and writer (with ZIP64) and manifest reader hold
   against their vectors and refusals.
 
