@@ -327,9 +327,14 @@ jobs:
           # the vector its starter gave; a program of the system is started as
           # given (openkal-image#42). Under 0.7.0 the image's start of itself
           # ended by SIGSEGV on Linux.
+          # The program of the system is named in the system's spelling: the
+          # vector reaches it as given, and cmd.exe given its own name as
+          # `C:/Windows/System32/cmd.exe' answered `The syntax of the command
+          # is incorrect.' (run 44538697059). The image's lines are printed
+          # before they are judged.
           a='${{ matrix.arch }}'
-          if [ "$RUNNER_OS" = Windows ]; then native=(C:/Windows/System32/cmd.exe /c "exit 5"); else native=(/bin/sh -c "exit 5"); fi
-          out=$(MSYS_NO_PATHCONV=1 "$OKRUN" "out/$a/starts.oke" "${native[@]}" | tr -d '\r')
+          if [ "$RUNNER_OS" = Windows ]; then native=('C:\Windows\System32\cmd.exe' /c "exit 5"); else native=(/bin/sh -c "exit 5"); fi
+          out=$({ MSYS_NO_PATHCONV=1 "$OKRUN" "out/$a/starts.oke" "${native[@]}" || true; } | tr -d '\r')
           echo "$out"
           grep -qx "starts: ok" <<<"$out" || { echo "::error::an image's start of an image, or of a program of the system"; exit 1; }
           # Signed, under a signature requirement: itself starts, and the
