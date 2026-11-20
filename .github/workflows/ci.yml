@@ -106,6 +106,9 @@ jobs:
             # the runner's loader, and a program of the system as given (0.7.1).
             CPATH="${spec%/openkal/process.h}" bash examples/build-image.sh "$arch" "out/$arch/starts.oke" examples/starts/app.c
             cp "out/$arch/starts.oke" "out/$arch/signed-starts.oke"
+            # An image that starts a context in a copy of itself, whose context
+            # ends the copy with kal_exit (0.7.2, #44).
+            CPATH="${spec%/openkal/process.h}" bash examples/build-image.sh "$arch" "out/$arch/forks.oke" examples/forks/app.c
             cp "out/$arch/hello.oke" "out/$arch/signed.oke"
             # The library examples/bind binds for a program of each system.
             bash examples/build-image.sh "$arch" "out/$arch/libmathlib.okso" examples/bind/mathlib/image/mathlib.c
@@ -345,6 +348,18 @@ jobs:
           grep -qx "starts: itself 7" <<<"$out" && grep -qx "starts: exits.oke -1006" <<<"$out" \
             || { echo "::error::the runner's signature requirements reach the image it starts"; exit 1; }
           echo "  ok  an image starts images through the runner, and a program of the system as given"
+      - name: A copy of the program ends as the copy ends itself (0.7.2)
+        if: runner.os == 'Linux'
+        run: |
+          # A library composes fork by starting a context in a copy of the
+          # address space (openkal.space); the copy holds the runner's memory
+          # and not the runner's task. Under 0.7.1 the copy's kal_exit waited
+          # for that task's return and never ended (#44, Sunrisepeak/cmd#5).
+          # The limit makes a copy that does not end a failure, not a hang.
+          out=$({ timeout 60 "$OKRUN" "out/${{ matrix.arch }}/forks.oke" || echo "status $?"; } | tr -d '\r')
+          echo "$out"
+          grep -qx "forks: 7" <<<"$out" || { echo "::error::a copy of the program did not end as it ended itself"; exit 1; }
+          echo "  ok  a copy of the program ends with its own status"
       - name: The same bytes
         run: |
           a='${{ matrix.arch }}'

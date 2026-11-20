@@ -158,6 +158,17 @@ task acts on a request, and 0.24.1 waits for the request's delivery before the
 status a shell gives such an end (0.24.0 ended first, with 143, in one run of
 two of `tools/tests/end_request.py`).
 
+Version 0.7.2 ends a copy of the program as the copy ends itself (#44). A
+library composes `fork` by starting a context in a copy of the address space
+(openkal.space); the copy holds the runner's memory and not the runner's task
+that waits for the requests to end. Under 0.7.1 the copy's `kal_exit` waited
+for that task to return, which in the copy never happens, so a program an
+image started by fork and exec never ended. The runner now compares the
+program it runs in with the one its task belongs to: in a copy nothing is
+joined, and the image's requests to end are its own. `examples/forks` ends a
+copy with `kal_exit(7)`, and CI expects 7 on Linux. A release's programs are
+built over openkal-platform 0.31.2, whose group holds this release.
+
 ## An image
 
 ```sh

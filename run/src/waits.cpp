@@ -45,6 +45,15 @@
 // continuing from a stop in a one-task image to its end, stopped with
 // "Couldn't get registers: No such process" in 10 of 12 runs of 0.7.0;
 // tools/tests/debugger_end.py).
+//
+// A COPY OF THE PROGRAM HAS NO TASK OF THE RUNNER'S (0.7.2, openkal-image#44). A
+// library composes `fork' by starting a context in a copy of the address space
+// (openkal.space): the copy holds this memory, the runner's task among what it
+// records, and not the task, which belongs to the program that was copied.
+// There nothing returns and nothing is joined, and the image's requests to end
+// are its own (`in_watching_program'). Under 0.7.1 the copy's `kal_exit'
+// waited for the task's return without end, and a program that started another
+// by fork and exec never ended (measured in Sunrisepeak/cmd#5).
 #include <openkal.h>
 #include "runner.h"
 
@@ -80,6 +89,30 @@ int g_running = 0;
 int g_ending = 0;
 kal_u32 g_returned = 0;
 const kal_u32* g_word = nullptr;
+// The program the runner's task belongs to, as the implementation identifies
+// it; zero where it gave no identity.
+kal_u64 g_watching_program = 0;
+
+// This program's identity: read again at each call, since a copy of the
+// program holds the value the program it copies read.
+kal_u64 this_program() {
+    kal_process self{};
+    if (kal_process_self(&self) != kal_ok) return 0;
+    kal_program_info info{};
+    info.self_size = sizeof info;
+    const int rc = kal_process_info(self, KAL_PINFO_ID, &info);
+    kal_process_close(self);
+    return rc == kal_ok && (info.present & KAL_PINFO_ID) ? info.id : 0;
+}
+
+// Whether the runner's task is in this program. An identity either side could
+// not read leaves the answer it had before 0.7.2: it is.
+bool in_watching_program() {
+    const kal_u64 watching = __atomic_load_n(&g_watching_program, __ATOMIC_ACQUIRE);
+    if (watching == 0) return true;
+    const kal_u64 here = this_program();
+    return here == 0 || here == watching;
+}
 
 unsigned home(kal_uintptr task) {
     return static_cast<unsigned>((static_cast<kal_u64>(task) * 0x9E3779B97F4A7C15ull) >> 40) % kLines;
@@ -221,6 +254,7 @@ void watch(void*) {
 void watch_requests() {
     g_entered = kal_task_current();
     take(g_entered);
+    __atomic_store_n(&g_watching_program, this_program(), __ATOMIC_RELEASE);
     __atomic_store_n(&g_watched, 1, __ATOMIC_RELEASE);
     if (kal_task_start(&watch, nullptr, &g_watcher) == kal_ok) {
         __atomic_store_n(&g_running, 1, __ATOMIC_RELEASE);
@@ -232,6 +266,8 @@ void watch_requests() {
 
 void stop_watching() {
     if (!__atomic_exchange_n(&g_running, 0, __ATOMIC_ACQ_REL)) return;
+    // In a copy of the program no task of the runner's will return (0.7.2).
+    if (!in_watching_program()) return;
     __atomic_store_n(&g_ending, 1, __ATOMIC_RELEASE);
     // A wake that comes between the task's look at `g_ending' and its wait is
     // not seen; the next, a millisecond on, is. The word is the
@@ -278,6 +314,9 @@ const kal_u32* requests_taken() {
     // written, whichever asked first.
     const kal_u32* word = kal_process_stop_requested();
     if (!word || !__atomic_load_n(&g_watched, __ATOMIC_ACQUIRE)) return word;
+    // A copy of the program has no task of the runner's to count a request on
+    // the image's word: its requests are its own (0.7.2).
+    if (!in_watching_program()) return word;
     __atomic_store_n(&g_taken, 1, __ATOMIC_RELEASE);
     return &g_image_word;
 }
