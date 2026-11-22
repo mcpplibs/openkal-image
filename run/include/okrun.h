@@ -31,6 +31,17 @@ struct okrun_options {
     const char*           loader;
 };
 
+/* okrun's command line (0.7.3): `[--require-signature] [--trust <hex>]...
+ * [--debugger] [--prof=<what>[:dir]] [--argv0=<name>] [--] image|okb
+ * [arguments...]', and `cache [list | gc [--all]]'. The program that calls it
+ * is the loader an image's start of an image file goes through (its own name,
+ * kal_env_image), so a program built over the runner that runs the image it is
+ * given -- `okrun', a platform's carrier as its package's runner -- starts an
+ * image an image starts as `okrun' does. Returns only when the image could not
+ * be started (127, the reason written to standard error) or for a usage error
+ * (2). */
+int okrun_main(int argc, char** argv);
+
 /* Runs an image that lies in memory. `name' is what the image is told its
  * own name is (`kal_env_image'); `argv' is what it is told its arguments are,
  * the first being its name as it was started. Bytes that are an archive of

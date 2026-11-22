@@ -169,6 +169,17 @@ joined, and the image's requests to end are its own. `examples/forks` ends a
 copy with `kal_exit(7)`, and CI expects 7 on Linux. A release's programs are
 built over openkal-platform 0.31.2, whose group holds this release.
 
+Version 0.7.3 makes okrun's command line a function of the runner,
+`okrun_main` (`include/okrun.h`), so that every program built over the runner
+that runs the image it is given names itself as the loader an image's start of
+an image file goes through (#46). The program `okrun` is that function; so is a
+platform's carrier where it is its package's runner. Under 0.7.2 the carrier
+named no loader, and on `i686-openkal`, whose runner is the carrier, an image
+that started an image was refused (`ENOEXEC` from `posix_spawn`, status 127 in
+a copy that called exec). A CI job builds okrun for `i686-linux-musl` and runs
+`examples/starts` for i686: the image starts itself, `exits.oke` and a program
+of the system.
+
 ## An image
 
 ```sh
